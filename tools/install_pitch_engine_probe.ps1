@@ -4,6 +4,19 @@ param(
         "pitch_order_probe",
         "pitch_fraction_probe",
         "pitch_overlap_probe",
+        "pitch_wander_probe",
+        "pitch_load_probe",
+        "pitch_exhaustion_probe",
+        "first_note_probe",
+        "stop_scope_probe",
+        "note_count_probe",
+        "song_pitch_probe",
+        "pitch_direction_probe",
+        "pitch_timing_probe",
+        "emitter_priming_probe",
+        "startup_delay_probe",
+        "pitch_race_probe",
+        "pitch_blip_probe",
         "timeline_sync_probe"
     )]
     [string]$ProbeName = "pitch_engine_probe"

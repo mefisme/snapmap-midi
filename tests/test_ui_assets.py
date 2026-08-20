@@ -1883,3 +1883,17 @@ def test_dragging_a_note_grows_song_length_live_not_only_on_commit():
         "songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0)" in _JS
     )
     assert "STATE.preview.duration_ms = drag.songLengthBase;" in _JS
+
+
+def test_lengthening_drags_do_not_clamp_to_their_own_moving_ceiling():
+    """`positionFromClientX` clamps to `ROLL.contentWidth`, which maps to
+    whatever `STATE.preview.duration_ms` already is -- fine for seeking, but
+    for a drag that is itself growing that same duration it becomes a
+    ceiling chasing itself: past the current edge, every further pointer
+    move re-clamps back to "the duration this drag already grew it to," so
+    the note (or the song-length handle) stops advancing no matter how much
+    further the pointer moves. `positionFromClientXPast` fixes the ratio to
+    the duration at drag START instead, so there is nothing to chase."""
+    assert "function positionFromClientXPast(clientX, referenceDurationMs)" in _JS
+    assert "positionFromClientXPast(event.clientX, NOTE_DRAG.songLengthBase)" in _JS
+    assert "positionFromClientXPast(event.clientX, SONG_LENGTH_DRAG.base)" in _JS

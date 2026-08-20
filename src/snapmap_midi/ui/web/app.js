@@ -3556,6 +3556,23 @@
     return x / ROLL.contentWidth * ((STATE.preview && STATE.preview.duration_ms) || 0);
   }
 
+  // A drag that is allowed to lengthen the song (a note dragged/resized past
+  // the current end, or the song-length handle itself) cannot use
+  // `positionFromClientX` for its own continuation: that helper clamps the
+  // pixel offset to `ROLL.contentWidth`, so once the pointer reaches that
+  // edge it always maps back to "whatever the CURRENT duration already is" --
+  // a ceiling that chases itself and stops the drag from ever getting
+  // further ahead of it. Using the duration captured ONCE at drag start as a
+  // fixed ms-per-pixel ratio, with no upper clamp, makes the projected time
+  // keep growing in a straight line for as long as the pointer keeps moving
+  // right, matching how far it has actually been dragged.
+  function positionFromClientXPast(clientX, referenceDurationMs) {
+    var rect = el('pianoRollViewport').getBoundingClientRect();
+    var x = clientX - rect.left + el('pianoRollViewport').scrollLeft;
+    var duration = Math.max(1, Number(referenceDurationMs) || 0);
+    return Math.max(0, x / ROLL.contentWidth * duration);
+  }
+
   function positionFromCanvas(event) { return positionFromClientX(event.clientX); }
 
   // The row math every draw already inlines as `(127 - pitch) * ROLL.rowHeight
@@ -3757,7 +3774,7 @@
   }
 
   function updateNoteDragMove(event) {
-    var currentTimeMs = positionFromClientX(event.clientX);
+    var currentTimeMs = positionFromClientXPast(event.clientX, NOTE_DRAG.songLengthBase);
     var currentPitch = pitchFromClientY(event.clientY);
     var rawStart = NOTE_DRAG.startBase + (currentTimeMs - NOTE_DRAG.anchorTimeMs);
     var newPitch = clamp(NOTE_DRAG.pitchBase + (currentPitch - NOTE_DRAG.anchorPitch), 0, 127);
@@ -3765,7 +3782,7 @@
   }
 
   function updateNoteDragResize(event) {
-    var snappedEnd = snappedTimeMs(positionFromClientX(event.clientX));
+    var snappedEnd = snappedTimeMs(positionFromClientXPast(event.clientX, NOTE_DRAG.songLengthBase));
     var duration = Math.max(1, Math.round(snappedEnd - NOTE_DRAG.startBase));
     applyNoteDragTiming(NOTE_DRAG.startBase, duration, NOTE_DRAG.pitchBase);
   }
@@ -3972,7 +3989,7 @@
 
   function updateSongLengthDrag(event) {
     if (!SONG_LENGTH_DRAG || SONG_LENGTH_DRAG.pointer !== event.pointerId) { return; }
-    var currentTimeMs = positionFromClientX(event.clientX);
+    var currentTimeMs = positionFromClientXPast(event.clientX, SONG_LENGTH_DRAG.base);
     var delta = currentTimeMs - SONG_LENGTH_DRAG.anchorTimeMs;
     SONG_LENGTH_DRAG.live = Math.max(1, Math.round(snappedTimeMs(SONG_LENGTH_DRAG.base + delta)));
     queueDraw();

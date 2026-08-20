@@ -265,7 +265,11 @@ Trigger the `pitch-order-probe` switch once. Listen every two seconds:
 Acceptance target:
 
 - `[ ]` The 4-second pitch-before-start case is a clean C5 with no glide.
-- `[ ]` The result confirms the production event ordering remains valid in the current engine/editor build.
+- NOTE (2026-08-19): pitch-before-start is **no longer the production ordering**. It was
+  measured to be a race that intermittently leaves a note at its sample's natural pitch
+  (~2 in 11). Export now writes the modifier 1 ms AFTER the start. A single clean note here
+  does not exercise that -- see
+  `doom-re/docs/truth/engine/snapmap-timeline-sound-modifiers.md`.
 
 ### 5.2 Fractional pitch/cents
 
@@ -322,7 +326,10 @@ The most important observations are:
 - `[ ]` The 8-second generic case intentionally glides from C4 to C5 over 250 ms.
 - `[ ]` The Speaker glide case, if retained by the engine, behaves consistently.
 
-This probe is diagnostic; production export currently relies on timeline emitters and pitch-before-start ordering, not a Speaker entity for every note.
+This probe is diagnostic; production export relies on timeline emitters, not a Speaker entity
+for every note. Since 2026-08-19 it writes each modifier 1 ms AFTER its own start rather than
+before it: the same-timestamp ordering this section was written against is a race that drops
+pitch on scattered notes.
 
 ## 6. Analyzer and per-track pitch controls
 

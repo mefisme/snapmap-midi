@@ -614,10 +614,13 @@ def test_track_attack_mutes_the_live_sound_before_starting_its_gain_ramp(minimal
         events = groups["item[%d]" % group_index]["events"]
         calls = [events["item[%d]" % index] for index in range(events["num"])]
         definitions = [call["eventCall"]["\neventHandle_t eventDef"] for call in calls]
-        if definitions[:4] != ["fadePitch", "startSoundShader", "fadeSound", "fadeSound"]:
+        # The start leads now: the pitch modifier follows one millisecond
+        # later, on the same tick as the attack's mute, because tying it to
+        # the start was a race that sometimes left the note unpitched.
+        if definitions[:4] != ["startSoundShader", "fadeSound", "fadePitch", "fadeSound"]:
             continue
-        assert [call["eventTime"] for call in calls[:4]] == [0, 0, 1, 2]
-        assert calls[2]["eventCall"]["args"]["item[1]"] == {"float": -60.0}
+        assert [call["eventTime"] for call in calls[:4]] == [0, 1, 1, 2]
+        assert calls[1]["eventCall"]["args"]["item[1]"] == {"float": -60.0}
         assert calls[3]["eventCall"]["args"]["item[2]"] == {"float": 0.25}
         break
     else:
@@ -730,25 +733,35 @@ def _timeline_event_times(raw):
 
 
 def _assert_retunes_land_on_an_idle_emitter(raw):
-    """No `fadePitch` may land while a previously started sound is still
-    live. The emitter is idle when the newest stop before that modifier is
-    later than the newest start before it."""
+    """A `fadePitch` may reach its OWN note and nothing older.
+
+    Each modifier now lands one millisecond after the start it belongs to,
+    because tying it to that start was a race the start sometimes won, leaving
+    the note with no modifier at all. So "the emitter is idle" can no longer
+    mean "nothing is playing" -- the note being tuned is playing, by design.
+
+    What must still hold is the original point: a modifier must not find a
+    PREDECESSOR still sounding, or it bends that instead and the phrase reads
+    as wandering pitch. So the newest start before the modifier has to be its
+    own, and whatever ran before that start must already have been stopped."""
     timed = _timeline_event_times(raw)
     retunes = [t for t, defn in timed if defn == "fadePitch"]
     assert retunes, timed
+    starts = sorted(t for t, defn in timed if defn == "startSoundShader")
     for retune in retunes:
-        last_start = max(
-            (t for t, defn in timed if defn == "startSoundShader" and t < retune),
-            default=None,
-        )
-        if last_start is None:
-            continue  # the first note: nothing was playing to intercept it
-        last_stop = max(
-            (t for t, defn in timed if defn == "stopSound" and t < retune), default=None
-        )
-        assert last_stop is not None and last_stop > last_start, (
-            retune, last_start, last_stop, timed
-        )
+        own_start = max((t for t in starts if t <= retune), default=None)
+        assert own_start is not None, (retune, timed)
+        # Its own start, one millisecond earlier -- or two for a glide ramp,
+        # which follows the instantaneous pitch rather than the start.
+        assert retune - own_start in (1, 2), (retune, own_start, timed)
+        previous_start = max((t for t in starts if t < own_start), default=None)
+        if previous_start is None:
+            continue  # the first note: nothing older could be intercepted
+        cleared = [
+            t for t, defn in timed
+            if defn == "stopSound" and previous_start < t <= own_start
+        ]
+        assert cleared, (retune, own_start, previous_start, timed)
 
 
 @pytest.mark.parametrize(
@@ -838,7 +851,20 @@ def test_decaying_note_off_and_trailing_rest_do_not_add_stop_events(tmp_path):
     assert b"stopSound" not in short_raw
 
 
-def test_expression_events_precede_start_in_proven_equal_time_order(minimal_timeline_map):
+def test_the_pitch_modifier_lands_one_ms_after_its_own_start(minimal_timeline_map):
+    """Gain is tied to the start; PITCH deliberately is not.
+
+    Writing the modifier at the start's own timestamp and relying on array
+    order was a race. Measured live it lost often enough to leave roughly two
+    notes in eleven playing at the sample's natural pitch, because a modifier
+    is per-event and a start that wins the tie never receives one.
+    `tools/create_pitch_race_probe.py` reproduces that against the old order
+    and comes back clean against this one.
+
+    Earlier is not available either: a modifier fired before its start reaches
+    only what is already audible, so at 2 ms ahead an entire probe run played
+    raw. One millisecond after the start is the case doom-re measured directly
+    -- a modifier reaches a sound that is already playing."""
     raw, stats = compile_to_rawmap(
         TINY_MIDI,
         json.dumps(minimal_timeline_map).encode("utf-8"),
@@ -861,15 +887,15 @@ def test_expression_events_precede_start_in_proven_equal_time_order(minimal_time
         block = groups["item[%d]" % group_index]["events"]
         events = [block["item[%d]" % index] for index in range(block["num"])]
         definitions = [event["eventCall"]["\neventHandle_t eventDef"] for event in events]
-        if definitions[:3] == ["fadePitch", "fadeSound", "startSoundShader"]:
+        if definitions[:3] == ["fadeSound", "startSoundShader", "fadePitch"]:
             matched = events[:3]
             break
 
     assert matched is not None
-    assert [event["eventTime"] for event in matched] == [0, 0, 0]
-    assert matched[0]["eventCall"]["args"]["item[1]"] == {"float": 1.0}
-    assert matched[1]["eventCall"]["args"]["item[1]"] == {"float": 9.0}
-    assert matched[2]["eventCall"]["args"]["item[0]"] == {"decl": {"sound": "play_pianoc4"}}
+    assert [event["eventTime"] for event in matched] == [0, 0, 1]
+    assert matched[0]["eventCall"]["args"]["item[1]"] == {"float": 9.0}
+    assert matched[1]["eventCall"]["args"]["item[0]"] == {"decl": {"sound": "play_pianoc4"}}
+    assert matched[2]["eventCall"]["args"]["item[1]"] == {"float": 1.0}
     assert stats["expressive_one_shots"] >= 1
     assert stats["pitch_adjusted"] == 1
 
@@ -896,12 +922,13 @@ def test_absolute_note_pitch_is_the_value_written_to_the_timeline(minimal_timeli
         block = groups["item[%d]" % group_index]["events"]
         events = [block["item[%d]" % index] for index in range(block["num"])]
         definitions = [event["eventCall"]["\neventHandle_t eventDef"] for event in events]
-        if definitions[:3] == ["fadePitch", "fadeSound", "startSoundShader"]:
+        if definitions[:3] == ["fadeSound", "startSoundShader", "fadePitch"]:
             matched = events[:3]
             break
 
     assert matched is not None
-    assert matched[0]["eventCall"]["args"]["item[1]"] == {"float": -3.0}
+    assert matched[2]["eventTime"] == matched[1]["eventTime"] + 1
+    assert matched[2]["eventCall"]["args"]["item[1]"] == {"float": -3.0}
     assert stats["pitch_adjusted"] == 1
 
 
@@ -944,7 +971,9 @@ def test_monophonic_track_glide_ramps_from_the_previous_pitch(tmp_path, minimal_
             if event["eventCall"]["\neventHandle_t eventDef"] == "fadePitch":
                 pitches.append(event)
 
-    glide = next(event for event in pitches if event["eventTime"] == 501)
+    # 500 starts the note, 501 sets its instantaneous starting pitch, and the
+    # ramp follows at 502 so the two cannot tie.
+    glide = next(event for event in pitches if event["eventTime"] == 502)
     assert glide["eventCall"]["args"]["item[1]"] == {"float": 2.0}
     assert glide["eventCall"]["args"]["item[2]"] == {"float": 0.25}
     assert stats["voices"] == 1

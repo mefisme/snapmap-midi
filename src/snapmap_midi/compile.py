@@ -419,12 +419,6 @@ def compile_to_rawmap(
                 # own modifier, leaving the emitter genuinely idle for it.
                 scheduled.append(_events.stop(max(previous.start, n.start - 1)))
             previous_silent_at = None
-            # Live-engine probes established that an instantaneous modifier has
-            # to be serialized BEFORE the same-time start. Speaker entities
-            # swallow this path; an ordinary Timeline target applies it. Every
-            # isolated note writes an explicit pitch and gain, including zero,
-            # so a reused emitter cannot inherit the previous note's state.
-            scheduled.append(_events.fade_pitch(n.start, start_pitch))
             attack_ms = int(
                 for_part(part_attack_ms or {}, getattr(n, "track", 0), n.chan, 0) or 0
             )
@@ -442,13 +436,35 @@ def compile_to_rawmap(
             else:
                 scheduled.append(_events.fade(n.start, n.volume_db, 0.0))
                 scheduled.append(_events.start(n.shader, sound_start))
+            # The modifier goes one millisecond AFTER the start, never tied to
+            # it.
+            #
+            # Writing both at the same timestamp and relying on array order was
+            # a RACE. It usually worked, and when it did not the start won, the
+            # note had no modifier of its own -- modifiers being per-event and
+            # never inherited -- and it played at the sample's natural pitch.
+            # That is the "random notes play raw" fault: measured live at
+            # roughly two notes in eleven, and reproduced against this exact
+            # ordering by `tools/create_pitch_race_probe.py`, whose group B
+            # (this scheme) came back clean over 24 notes where group A did
+            # not.
+            #
+            # Earlier is not an option: a modifier fired before its start
+            # addresses whatever is audible at that instant, which is nothing,
+            # and no later sound inherits it -- probed at 2 ms ahead, the whole
+            # run played raw. One millisecond after, the sound is definitely
+            # playing, which is the case doom-re measured directly ("a modifier
+            # reaches a sound that is already playing") and the same trick the
+            # glide branch below already relies on. The cost is one millisecond
+            # of natural pitch at the head of a note, well under anything
+            # audible.
+            scheduled.append(_events.fade_pitch(post_start, start_pitch))
             if glide_ms:
-                # One millisecond keeps the ramp on the newly started sound.
-                # Zero-delay pitch-before-start is the separate immediate path
-                # proven above; longer onset delays were audibly inconsistent.
+                # The ramp follows the instantaneous starting pitch above, so
+                # it lands a millisecond later and cannot tie with it.
                 scheduled.append(
                     _events.fade_pitch(
-                        post_start,
+                        post_start + 1,
                         n.pitch_modifier,
                         glide_ms / 1000.0,
                     )

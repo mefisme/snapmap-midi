@@ -1286,6 +1286,25 @@ def test_a_sidecar_that_cannot_be_written_does_not_fail_the_export(tmp_path):
 # ---- the file dialogs ----
 
 
+def test_every_file_dialog_filter_is_one_pywebview_actually_accepts():
+    """`_MIDI_TYPES`/`_MAP_TYPES`/`_PROJECT_TYPES` never reach a real dialog in
+    this test file -- `_FakeWindow` answers before `import webview` happens --
+    so a filter string invalid to pywebview's own validator would pass every
+    other test here and only fail at the keyboard, in the running app, as a
+    red toast. `snapmap-midi projects (*.smsong.json)` did exactly that: the
+    hyphen in "snapmap-midi" isn't in pywebview's `[\\w ]+` description
+    pattern. Call pywebview's real parser -- it needs no window and no
+    display -- so this class of bug fails a `pytest -q` instead of a click.
+    """
+    from webview.util import parse_file_type
+
+    from snapmap_midi.ui import api
+
+    for group in (api._MIDI_TYPES, api._MAP_TYPES, api._PROJECT_TYPES):
+        for file_type in group:
+            parse_file_type(file_type)  # raises ValueError on an invalid filter
+
+
 def test_the_dialogs_answer_when_no_window_is_attached():
     """Every method of this object exists before the window does: the window is
     created WITH the bridge as its Javascript surface, so there is a moment

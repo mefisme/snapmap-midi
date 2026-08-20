@@ -56,7 +56,10 @@ _MAP_TYPES = ("Saved maps (*.json)", "All files (*.*)")
 
 #: A saved project. The second entry is there for the same reason the MIDI
 #: picker's is: a file somebody renamed is still their project.
-_PROJECT_TYPES = ("snapmap-midi projects (*%s)" % project.PROJECT_SUFFIX, "All files (*.*)")
+#: The label must not contain a hyphen: pywebview's file-filter validator
+#: (`webview.util.parse_file_type`) only accepts `[\w ]+` before the `(...)`,
+#: so "snapmap-midi projects" fails at the dialog call, not at import time.
+_PROJECT_TYPES = ("Snapmap Midi projects (*%s)" % project.PROJECT_SUFFIX, "All files (*.*)")
 
 #: The complete stock event-name alphabet and measured maximum length.
 _PLAY_EVENT = re.compile(r"(?i)^play_[a-z0-9_-]{1,59}$")

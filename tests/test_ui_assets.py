@@ -1176,6 +1176,19 @@ def test_fresh_note_ons_never_lose_their_attack_fade_to_scheduling_jitter():
     assert "audible +=" not in fn
 
 
+def test_looped_playback_never_schedules_a_note_outside_the_brace():
+    """LOOKAHEAD_MS (1300 ms) easily reaches past a short loop's own end, so
+    without a boundary here a note just outside the brace already had a real
+    AudioBufferSourceNode.start() queued long before wrapLoopPlayback's
+    rAF-polled boundary check ever noticed -- an audible sliver of that
+    note's onset on every pass, not a rare scheduling race. scheduleAhead
+    must never admit past the loop's end while looping is on."""
+    fn = _JS.split("function scheduleAhead()", 1)[1].split("\n  }", 1)[0]
+    assert "var admissionEnd = loopEnabledState() ? Math.min(horizon, loopEndMs()) : horizon;" in fn
+    assert "events[AUDIO.nextIndex].start <= admissionEnd" in fn
+    assert "AUDIO.scheduledThrough = admissionEnd" in fn
+
+
 def test_track_attack_survives_a_note_also_shortened_by_release():
     """`scheduleEvent` used to anchor a cut note's release hold at `when` --
     the exact same automation instant Track Attack's own fade-in anchors at.
@@ -1299,7 +1312,7 @@ def test_settings_edits_handoff_without_stopping_transport():
     assert "function capturePlaybackPreview()" in _JS
     assert "function playbackEvents()" in _JS
     assert "function handoffPlaybackPreview()" in _JS
-    assert "AUDIO.scheduledThrough = horizon" in _JS
+    assert "AUDIO.scheduledThrough = admissionEnd" in _JS
     assert "AUDIO.nextIndex = firstFutureEvent(boundary + 0.001)" in _JS
 
 

@@ -4609,7 +4609,16 @@
     var events = playbackEvents();
     var position = currentPosition();
     var horizon = position + LOOKAHEAD_MS;
-    while (AUDIO.nextIndex < events.length && events[AUDIO.nextIndex].start <= horizon) {
+    // While looping, never admit a note starting at or past the loop's own
+    // end: LOOKAHEAD_MS (1300 ms) is comfortably longer than a short loop,
+    // so without this a note just outside the brace already has a real
+    // AudioBufferSourceNode.start() queued well before wrapLoopPlayback gets
+    // a chance to notice the boundary and stop it -- an audible sliver of
+    // the next note's onset, not a scheduling race to fix on the stop side.
+    // Nothing outside the loop is ever handed to Web Audio in the first
+    // place, so there is nothing left for the wrap to race against.
+    var admissionEnd = loopEnabledState() ? Math.min(horizon, loopEndMs()) : horizon;
+    while (AUDIO.nextIndex < events.length && events[AUDIO.nextIndex].start <= admissionEnd) {
       var event = events[AUDIO.nextIndex];
       var when = AUDIO.anchorTime + (event.start - AUDIO.anchorPosition) / 1000;
       // Every note reaching this loop is a fresh note-on -- `scheduleActiveAt`
@@ -4632,7 +4641,7 @@
       scheduleEvent(event, event.start, when);
       AUDIO.nextIndex += 1;
     }
-    AUDIO.scheduledThrough = horizon;
+    AUDIO.scheduledThrough = admissionEnd;
   }
 
   // Reaching the loop's end while "Loop playback" is on wraps back to its

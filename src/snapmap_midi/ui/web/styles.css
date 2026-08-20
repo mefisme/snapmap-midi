@@ -278,10 +278,12 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
 .sound-browser-modal { width: min(980px, calc(100vw - 48px)); height: min(680px, calc(100vh - 56px)); min-width: 620px; min-height: 420px; padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--text); user-select: none; -webkit-user-select: none; }
 .song-length-modal { width: min(360px, calc(100vw - 48px)); padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--text); }
-.song-length-modal .sound-browser-foot { justify-content: flex-end; }
+.song-length-modal .sound-browser-foot { justify-content: space-between; }
 .song-length-body { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
 .song-length-body label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
 .song-length-body input { width: 100%; box-sizing: border-box; }
+.song-length-unit-row { display: flex; gap: 6px; }
+.song-length-unit-row .roll-view-toggle { flex: 1; }
 .sound-browser-head { min-height: 58px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel2); }
 .sound-browser-head strong { font-size: 13px; }
 .sound-browser-search { min-height: 46px; flex: none; display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }

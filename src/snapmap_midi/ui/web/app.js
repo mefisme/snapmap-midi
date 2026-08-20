@@ -3697,6 +3697,14 @@
     source.visual_end = end;
     source.pitch = pitch;
     source.source_pitch = pitch;
+    // Mirrors the backend's own auto-grow (`Session._fit_length`): dragging a
+    // note past the song's current end should stretch the roll AS you drag,
+    // not only once the bridge call commits. Only grows here -- never
+    // shrinks -- matching the backend rule exactly; `revertNoteDrag` is what
+    // puts it back if the drag is undone or abandoned.
+    if (STATE.preview && end > (Number(STATE.preview.duration_ms) || 0)) {
+      STATE.preview.duration_ms = end;
+    }
     invalidatePreviewRenderCache();
     queueDraw();
     if (NOTE_INSPECTOR_OPEN && SELECTED_NOTE_ID === source.id) { syncNoteInspector(); }
@@ -3708,6 +3716,9 @@
   // edit never lingers on screen as if it had taken).
   function revertNoteDrag(drag) {
     applyNoteDragTiming(drag.startBase, drag.durationBase, drag.pitchBase);
+    if (STATE.preview && drag.songLengthBase !== undefined) {
+      STATE.preview.duration_ms = drag.songLengthBase;
+    }
   }
 
   function beginNoteDrag(event, hit, kind) {
@@ -3734,7 +3745,8 @@
       pitchBase: Number(source.pitch) || 0,
       durationBase: Math.max(1, writtenEnd - (Number(source.start) || 0)),
       anchorTimeMs: positionFromClientX(event.clientX),
-      anchorPitch: pitchFromClientY(event.clientY)
+      anchorPitch: pitchFromClientY(event.clientY),
+      songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0)
     };
     canvas.setPointerCapture(event.pointerId);
     canvas.classList.toggle('note-resize', kind === 'resize' || kind === 'resize-start');
@@ -6947,11 +6959,55 @@
     }, function (error) { fail(error); });
   }
 
+  // A musician thinks in bars, not milliseconds -- this pair of helpers
+  // converts using the same tempo-aware tick math `timingLinesAt` already
+  // uses to place bar lines on the ruler (`timeAtTick`/`tickAtTime`), so a
+  // bar count here always lands on the exact same tick a bar line would draw
+  // at, tempo changes included. Storage stays ms; this is an input-only
+  // convenience.
+  function ticksPerBar() {
+    var timing = timingManifest();
+    var ticksPerBeat = Number(timing.ticks_per_beat) || 480;
+    return ticksPerBeat * 4 / Math.max(1, ROLL.meterDenominator) * Math.max(1, ROLL.meterNumerator);
+  }
+  function msFromBars(bars) {
+    return Math.max(1, Math.round(timeAtTick(Math.max(0, Number(bars) || 0) * ticksPerBar())));
+  }
+  function barsFromMs(ms) {
+    var step = ticksPerBar();
+    if (!isFinite(step) || step <= 0) { return 0; }
+    return Math.max(0, tickAtTime(Math.max(0, Number(ms) || 0)) / step);
+  }
+
+  var SONG_LENGTH_UNIT = 'ms';
+
+  function setSongLengthUnit(unit) {
+    SONG_LENGTH_UNIT = unit;
+    var msActive = unit === 'ms';
+    el('songLengthUnitMs').setAttribute('aria-pressed', String(msActive));
+    el('songLengthUnitBars').setAttribute('aria-pressed', String(!msActive));
+    el('songLengthMsField').hidden = !msActive;
+    el('songLengthBarsField').hidden = msActive;
+    (msActive ? el('songLengthInput') : el('songLengthBarsInput')).focus();
+  }
+
+  function currentSongLengthMs() {
+    return SONG_LENGTH_UNIT === 'bars'
+      ? msFromBars(el('songLengthBarsInput').value)
+      : Math.max(1, Math.round(Number(el('songLengthInput').value) || 0));
+  }
+
+  function populateSongLengthFields(durationMs) {
+    var duration = Math.max(1, Math.round(Number(durationMs) || 0));
+    el('songLengthInput').value = String(duration);
+    el('songLengthBarsInput').value = String(Math.round(barsFromMs(duration) * 100) / 100);
+  }
+
   function openSongLengthModal() {
     closeMenus();
     if (!hasSong()) { return; }
-    var current = Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0);
-    el('songLengthInput').value = String(Math.max(1, current));
+    populateSongLengthFields(STATE.preview && STATE.preview.duration_ms);
+    setSongLengthUnit('ms');
     el('songLengthOverlay').hidden = false;
     el('songLengthInput').focus();
     el('songLengthInput').select();
@@ -6962,11 +7018,24 @@
   }
 
   function commitSongLength() {
-    var value = Math.max(1, Math.round(Number(el('songLengthInput').value) || 0));
+    var value = currentSongLengthMs();
     if (!api()) { return; }
     var sequence = nextRequest();
     setBusy(true, 'Setting song length...');
     api().set_song_length(value).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      closeSongLengthModal();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function fitSongLength() {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Fitting song length to content...');
+    api().fit_song_length().then(function (response) {
       setBusy(false);
       if (!response || !response.ok) { fail(response); return; }
       adopt(response, sequence);
@@ -6980,10 +7049,23 @@
     el('songLengthClose').addEventListener('click', closeSongLengthModal);
     el('songLengthCancel').addEventListener('click', closeSongLengthModal);
     el('songLengthSet').addEventListener('click', commitSongLength);
+    el('songLengthFit').addEventListener('click', fitSongLength);
+    el('songLengthUnitMs').addEventListener('click', function () {
+      populateSongLengthFields(currentSongLengthMs());
+      setSongLengthUnit('ms');
+    });
+    el('songLengthUnitBars').addEventListener('click', function () {
+      populateSongLengthFields(currentSongLengthMs());
+      setSongLengthUnit('bars');
+    });
     el('songLengthOverlay').addEventListener('pointerdown', function (event) {
       if (event.target === this) { closeSongLengthModal(); }
     });
     el('songLengthInput').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') { event.preventDefault(); commitSongLength(); }
+      else if (event.key === 'Escape') { event.preventDefault(); closeSongLengthModal(); }
+    });
+    el('songLengthBarsInput').addEventListener('keydown', function (event) {
       if (event.key === 'Enter') { event.preventDefault(); commitSongLength(); }
       else if (event.key === 'Escape') { event.preventDefault(); closeSongLengthModal(); }
     });

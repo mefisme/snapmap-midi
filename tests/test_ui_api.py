@@ -1286,6 +1286,62 @@ def test_export_loop_before_a_song_is_open_says_so_and_writes_nothing(tmp_path):
     assert not (tmp_path / "out").exists()
 
 
+def test_fit_song_length_restores_the_content_length_after_a_manual_shrink():
+    bridge = Bridge(midi=TINY_MIDI)
+    original = bridge.preview_manifest()["preview"]["duration_ms"]
+    bridge.set_song_length(1)
+    result = bridge.fit_song_length()
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == original
+
+
+def test_fit_song_length_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    original = bridge.preview_manifest()["preview"]["duration_ms"]
+    bridge.set_song_length(1)
+    bridge.fit_song_length()
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Set song length"
+    assert undone["preview"]["duration_ms"] == 1
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Set song length"
+    assert redone["preview"]["duration_ms"] == original
+
+
+def test_fit_song_length_before_a_song_is_open_says_so():
+    result = Bridge().fit_song_length()
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_shrinking_song_length_clamps_a_loop_end_that_would_land_past_it():
+    bridge = Bridge(midi=TINY_MIDI)
+    bridge.set_song_length(1000)
+    bridge.set_loop(200, 1000)
+    result = bridge.set_song_length(300)
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == 300
+    assert result["preview"]["loop_end_ms"] == 300
+    assert result["preview"]["loop_start_ms"] == 200
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Set song length"
+    assert undone["preview"]["duration_ms"] == 1000
+    assert (undone["preview"]["loop_start_ms"], undone["preview"]["loop_end_ms"]) == (200, 1000)
+
+
+def test_shrinking_song_length_past_the_loop_start_clamps_both_edges():
+    bridge = Bridge(midi=TINY_MIDI)
+    bridge.set_song_length(1000)
+    bridge.set_loop(700, 900)
+    result = bridge.set_song_length(50)
+    assert result["ok"] is True
+    assert result["preview"]["loop_end_ms"] == 50
+    assert result["preview"]["loop_start_ms"] == 49
+
+
 # ---- settings ----
 
 

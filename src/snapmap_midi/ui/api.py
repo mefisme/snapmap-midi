@@ -903,6 +903,16 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    def fit_song_length(self) -> dict:
+        """Set the song's length back to its content (furthest note / grid)."""
+        try:
+            self._session.fit_song_length()
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     def set_loop(self, start_ms, end_ms) -> dict:
         """Move the loop brace to a new region."""
         try:

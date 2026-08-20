@@ -493,23 +493,55 @@ class Session:
         `music/midi.py::resolve_notes`) -- and starts playing again the moment
         the length grows back past it. Shrinking is therefore free to undo:
         nothing here ever touches `Track.notes`.
+
+        The loop brace rides along if it would otherwise land past the new,
+        shorter end: `set_loop` refuses a loop past the song's length, so
+        leaving the brace where it was would strand it somewhere a later,
+        unrelated loop edit could reject for a reason that has nothing to do
+        with what that edit actually asked for. Growing the song never moves
+        the brace -- only a shrink past its current edge does.
         """
         with self._lock:
             if self._song is None:
                 raise ValueError("no song is open -- open a MIDI file first")
             song = self._song
             duration_ms = self._require_ms(duration_ms, "duration_ms", minimum=1)
-            before = song.duration_ms
+            before = (song.duration_ms, song.loop_start_ms, song.loop_end_ms)
+            loop_end = min(song.loop_end_ms, duration_ms)
+            loop_start = min(song.loop_start_ms, max(0, loop_end - 1))
+            after = (duration_ms, loop_start, loop_end)
 
             def _apply():
-                song.duration_ms = duration_ms
+                song.duration_ms, song.loop_start_ms, song.loop_end_ms = after
 
             def _revert():
-                song.duration_ms = before
+                song.duration_ms, song.loop_start_ms, song.loop_end_ms = before
 
             _apply()
             self.push_command("Set song length", revert=_revert, apply=_apply)
             self._analysis = self._analyze()
+
+    def fit_song_length(self) -> None:
+        """Set the song's length back to its content, in one undoable step.
+
+        The same value the workstation always showed before `duration_ms`
+        became a stored, editable fact: the later of the file's own
+        grid-completed measure and the furthest note actually written, walked
+        fresh across every track rather than read from import-time state, so
+        this still gives the right answer after notes have been moved,
+        resized, or deleted since. Delegates to `set_song_length` rather than
+        duplicating its undo/loop-clamp/analysis handling.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            content_ms = int(round((song.timing or {}).get("grid_duration_ms") or 0))
+            for track in song.tracks:
+                for note in track.notes:
+                    content_ms = max(content_ms, note.start_ms + note.duration_ms)
+            content_ms = max(1, content_ms)
+        self.set_song_length(content_ms)
 
     def set_loop(self, start_ms, end_ms) -> None:
         """Move the loop brace to a new region, both edges at once.

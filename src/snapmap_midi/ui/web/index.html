@@ -610,12 +610,20 @@
       <button type="button" class="close-button" id="songLengthClose" aria-label="Close"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-x"></use></svg></button>
     </header>
     <div class="song-length-body">
-      <label for="songLengthInput">Length, in milliseconds
+      <div class="song-length-unit-row">
+        <button type="button" class="roll-view-toggle" id="songLengthUnitMs" aria-pressed="true">Milliseconds</button>
+        <button type="button" class="roll-view-toggle" id="songLengthUnitBars" aria-pressed="false">Bars</button>
+      </div>
+      <label for="songLengthInput" id="songLengthMsField">Length, in milliseconds
         <input type="number" id="songLengthInput" min="1" step="1" inputmode="numeric">
+      </label>
+      <label for="songLengthBarsInput" id="songLengthBarsField" hidden>Length, in bars
+        <input type="number" id="songLengthBarsInput" min="0.01" step="0.25" inputmode="decimal">
       </label>
       <div class="muted">Notes past the new length are not deleted -- they stop playing and exporting, and show dimmed, until the length grows past them again.</div>
     </div>
     <footer class="sound-browser-foot">
+      <button type="button" class="btn" id="songLengthFit" title="Set the length back to the furthest note, or the file's own last measure">Fit to Content</button>
       <button type="button" class="btn" id="songLengthCancel">Cancel</button>
       <button type="button" class="btn primary" id="songLengthSet">Set length</button>
     </footer>

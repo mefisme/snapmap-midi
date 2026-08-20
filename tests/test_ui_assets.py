@@ -1855,3 +1855,31 @@ def test_limit_bass_note_duration_has_a_description():
         "track or instrument played it" in _HTML
     )
     assert "Independent of Sustain Limit and Track Sustain Limit" in _HTML
+
+
+def test_song_length_modal_offers_bars_and_fit_to_content():
+    """A musician thinks in bars, not milliseconds, and length changes often
+    enough that "fit back to my notes" needs to be one click inside the same
+    modal, not a menu hunt."""
+    assert 'id="songLengthUnitMs"' in _HTML
+    assert 'id="songLengthUnitBars"' in _HTML
+    assert 'id="songLengthBarsInput"' in _HTML
+    assert 'id="songLengthFit"' in _HTML
+    assert "function msFromBars(bars)" in _JS
+    assert "function barsFromMs(ms)" in _JS
+    assert "function fitSongLength()" in _JS
+    assert "api().fit_song_length()" in _JS
+    assert "el('songLengthFit').addEventListener('click', fitSongLength);" in _JS
+
+
+def test_dragging_a_note_grows_song_length_live_not_only_on_commit():
+    """Backend auto-grow (`Session._fit_length`) only fires once the bridge
+    call commits on pointerup -- the roll should already be stretching while
+    the pointer is still down, the same local-optimistic promise every other
+    drag in this file makes."""
+    assert "if (STATE.preview && end > (Number(STATE.preview.duration_ms) || 0)) {" in _JS
+    assert "STATE.preview.duration_ms = end;" in _JS
+    assert (
+        "songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0)" in _JS
+    )
+    assert "STATE.preview.duration_ms = drag.songLengthBase;" in _JS

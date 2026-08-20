@@ -3454,7 +3454,8 @@
     // Advertise the resize handle before a drag ever starts -- the same zone
     // beginNoteDrag will grab on pointerdown, so the cursor never promises a
     // gesture the click will not deliver.
-    canvas.classList.toggle("note-resize", !!hit && noteEdgeZone(hit) === "resize");
+    var zone = hit ? noteEdgeZone(hit) : null;
+    canvas.classList.toggle("note-resize", zone === "resize" || zone === "resize-start");
     queueDraw();
   }
 
@@ -3541,15 +3542,20 @@
   }
 
   // Whether a pointer sitting at `hit`'s geometry is over the note's body
-  // (move) or its last few pixels (resize) -- the SAME test whether it is
-  // asked while just hovering (for the cursor) or on pointerdown (to decide
-  // which drag begins), so the cursor never advertises a zone the click
-  // would not honor.
+  // (move), its last few pixels (resize the end) or its first few pixels
+  // (resize the start) -- the SAME test whether it is asked while just
+  // hovering (for the cursor) or on pointerdown (to decide which drag
+  // begins), so the cursor never advertises a zone the click would not
+  // honor. The end check runs first: on a note too narrow for both handles
+  // to fit, the end wins rather than the two overlapping unpredictably.
   function noteEdgeZone(hit) {
     var point = pianoRollPointer(el('pianoRoll'));
     if (!point) { return 'move'; }
-    var edge = hit.geometry.x + hit.geometry.width;
-    return point.x >= edge - NOTE_RESIZE_HANDLE_PX ? 'resize' : 'move';
+    var left = hit.geometry.x;
+    var right = left + hit.geometry.width;
+    if (point.x >= right - NOTE_RESIZE_HANDLE_PX) { return 'resize'; }
+    if (point.x <= left + NOTE_RESIZE_HANDLE_PX) { return 'resize-start'; }
+    return 'move';
   }
 
   // Rewrites the ONE display-event object a hit came from -- the same object
@@ -3583,7 +3589,7 @@
   function beginNoteDrag(event, hit, kind) {
     var source = hit.record.source;
     if (!source || !source.id) { return; }
-    openNoteInspector(source.id);
+    selectNote(source.id);
     if (!source.track_id) {
       // No owning track could be resolved for this note. Selection above
       // still stands; there is nothing to hand the bridge, so no drag starts.
@@ -3607,7 +3613,7 @@
       anchorPitch: pitchFromClientY(event.clientY)
     };
     canvas.setPointerCapture(event.pointerId);
-    canvas.classList.toggle('note-resize', kind === 'resize');
+    canvas.classList.toggle('note-resize', kind === 'resize' || kind === 'resize-start');
   }
 
   function updateNoteDragMove(event) {
@@ -3624,6 +3630,16 @@
     applyNoteDragTiming(NOTE_DRAG.startBase, duration, NOTE_DRAG.pitchBase);
   }
 
+  // The front-edge drag: the note's END stays put (startBase + durationBase,
+  // never recomputed mid-drag) and duration is whatever distance is left
+  // once the new, snapped start is clamped short of it.
+  function updateNoteDragResizeStart(event) {
+    var endBase = NOTE_DRAG.startBase + NOTE_DRAG.durationBase;
+    var snappedStart = snappedTimeMs(positionFromClientX(event.clientX));
+    var newStart = clamp(Math.round(snappedStart), 0, endBase - 1);
+    applyNoteDragTiming(newStart, endBase - newStart, NOTE_DRAG.pitchBase);
+  }
+
   // The one bridge call a drag makes, fired once on pointerup rather than per
   // pointermove -- the same local-optimistic-then-commit shape every other
   // drag in this app already uses (see `applyOptimisticMixPatch`'s doc
@@ -3632,10 +3648,13 @@
   function commitNoteDrag(drag) {
     if (!api()) { revertNoteDrag(drag); return; }
     var sequence = nextRequest();
-    setBusy(true, drag.kind === 'resize' ? 'Resizing note...' : 'Moving note...');
+    var resizing = drag.kind === 'resize' || drag.kind === 'resize-start';
+    setBusy(true, resizing ? 'Resizing note...' : 'Moving note...');
     var duration = Math.round(drag.event.midi_end - drag.event.start);
     var call = drag.kind === 'resize'
       ? api().resize_note(drag.trackId, drag.noteId, duration)
+      : drag.kind === 'resize-start'
+      ? api().resize_note_start(drag.trackId, drag.noteId, Math.round(drag.event.start))
       : api().move_note(
         drag.trackId, drag.noteId, Math.round(drag.event.start), Math.round(drag.event.pitch)
       );
@@ -3660,6 +3679,8 @@
     if (event.type === 'pointercancel') { revertNoteDrag(drag); clearNotePointer(); return; }
     var moved = drag.kind === 'resize'
       ? Math.round(drag.event.midi_end - drag.event.start) !== drag.durationBase
+      : drag.kind === 'resize-start'
+      ? drag.event.start !== drag.startBase
       : (drag.event.start !== drag.startBase || drag.event.pitch !== drag.pitchBase);
     if (!moved) { updateNotePointer(event); return; }
     commitNoteDrag(drag);
@@ -3686,6 +3707,7 @@
   function moveCanvasSeek(event) {
     if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
       if (NOTE_DRAG.kind === 'resize') { updateNoteDragResize(event); }
+      else if (NOTE_DRAG.kind === 'resize-start') { updateNoteDragResizeStart(event); }
       else { updateNoteDragMove(event); }
       return;
     }
@@ -6267,6 +6289,24 @@
     queueDraw();
   }
 
+  // Selecting a note -- a click, or the start of a drag -- makes it the
+  // Delete/Backspace target and draws its highlight, but never opens the
+  // note inspector by itself. Opening that panel on every click used to
+  // cover the very note somebody had just clicked to move or delete;
+  // double-click opens it instead (see the dblclick listener below).
+  function selectNote(noteId) {
+    var id = String(noteId || "");
+    if (NOTE_INSPECTOR_OPEN && SELECTED_NOTE_ID !== id) {
+      // The open panel describes a different note than the one just
+      // selected -- close it rather than let it go on showing stale data
+      // for a note that is no longer the selection.
+      NOTE_INSPECTOR_OPEN = false;
+      el("noteInspector").hidden = true;
+    }
+    SELECTED_NOTE_ID = id;
+    queueDraw();
+  }
+
   function closeNoteInspector() {
     NOTE_INSPECTOR_OPEN = false;
     SELECTED_NOTE_ID = null;
@@ -7048,6 +7088,19 @@
     canvas.addEventListener('pointerleave', clearNotePointer);
     canvas.addEventListener('pointerup', endCanvasSeek);
     canvas.addEventListener('pointercancel', endCanvasSeek);
+    // A single click only selects (see selectNote) so a click-to-move or
+    // click-to-delete never gets its target note covered by the inspector
+    // panel opening underneath the pointer. Right-click is the deliberate
+    // "show me the detail view" gesture instead -- double-click is reserved
+    // for adding/removing notes (a later phase), so the two can never fight
+    // over the same click.
+    canvas.addEventListener('contextmenu', function (event) {
+      var hit = hoveredRenderEvent(canvas);
+      if (hit && hit.record && hit.record.id) {
+        event.preventDefault();
+        openNoteInspector(hit.record.id);
+      }
+    });
     // The ruler always seeks (nothing there to click-select), and it stays
     // visible in lanes mode -- see .roll-pane in styles.css -- specifically
     // so scrubbing is still possible while lanes are showing. The lanes

@@ -863,6 +863,16 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    def resize_note_start(self, track_id, note_id, start_ms) -> dict:
+        """Move a note's start, keeping its end fixed instead of its duration."""
+        try:
+            self._session.resize_note_start(track_id, note_id, start_ms)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     def delete_note(self, track_id, note_id) -> dict:
         """Remove a note from its track."""
         try:

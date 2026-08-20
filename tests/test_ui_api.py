@@ -1016,6 +1016,50 @@ def test_resizing_a_note_can_be_undone_and_redone():
     assert reapplied["midi_end"] == before["start"] + 999
 
 
+def test_resizing_a_notes_start_moves_it_and_keeps_its_end():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    result = bridge.resize_note_start(track_id, note_id, before["start"] + 111)
+    assert result["ok"] is True
+    after = next(e for e in result["preview"]["display_events"] if e["id"] == note_id)
+    assert after["start"] == before["start"] + 111
+    assert after["midi_end"] == before["midi_end"]
+
+
+def test_resizing_a_notes_start_past_its_own_end_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    result = bridge.resize_note_start(track_id, note_id, before["midi_end"])
+    assert result["ok"] is False
+    assert "end" in result["error"]
+
+
+def test_resizing_a_notes_start_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.resize_note_start(track_id, note_id, before["start"] + 111)
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Resize note"
+    restored = next(e for e in undone["preview"]["display_events"] if e["id"] == note_id)
+    assert restored["start"] == before["start"]
+    assert restored["midi_end"] == before["midi_end"]
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Resize note"
+    reapplied = next(e for e in redone["preview"]["display_events"] if e["id"] == note_id)
+    assert reapplied["start"] == before["start"] + 111
+    assert reapplied["midi_end"] == before["midi_end"]
+
+
 def test_deleting_a_note_removes_it_from_the_preview():
     bridge = Bridge(midi=TINY_MIDI)
     track_id, note_id = _first_note(bridge)

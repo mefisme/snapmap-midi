@@ -355,6 +355,35 @@ class Session:
             self.push_command("Move note", revert=_revert, apply=_apply)
             self._analysis = self._analyze()
 
+    def resize_note_start(self, track_id, note_id, start_ms) -> None:
+        """Move a note's start, keeping its end fixed instead of its duration.
+
+        The front-edge drag: dragging a note's LEFT edge should anchor the
+        note's end and let duration follow, which is the opposite of what
+        `move_note` does. Asking for a duration here would make the caller
+        compute it from the current end anyway, so this takes the one number
+        a front-edge drag actually produces -- where the edge landed.
+        """
+        with self._lock:
+            track, note = self._track_and_note(track_id, note_id)
+            end_ms = note.start_ms + note.duration_ms
+            start_ms = self._require_ms(start_ms, "start_ms", minimum=0)
+            if start_ms >= end_ms:
+                raise ValueError(
+                    "start_ms %r is not before this note's end at %d ms" % (start_ms, end_ms)
+                )
+            before = (note.start_ms, note.duration_ms)
+            after = (start_ms, end_ms - start_ms)
+
+            def _apply():
+                note.start_ms, note.duration_ms = after
+
+            def _revert():
+                note.start_ms, note.duration_ms = before
+
+            _apply()
+            self.push_command("Resize note", revert=_revert, apply=_apply)
+
     def resize_note(self, track_id, note_id, duration_ms) -> None:
         """Change a note's written duration, keeping its start and pitch.
 

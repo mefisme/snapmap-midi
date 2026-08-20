@@ -269,6 +269,164 @@ class Session:
             raise ValueError("%s has no notes to anchor" % info.key)
         return info
 
+    # ---- editing notes ----
+
+    def _track_and_note(self, track_id, note_id):
+        """The track and note one structural edit names, or why neither exists.
+
+        Notes have no flat index -- `Track.notes` is the only list holding
+        them -- so every edit starts by walking the one track the caller says
+        the note is on. `track_id` is asked for rather than searching every
+        track for the note id: a stale `track_id` from a window that has not
+        yet heard about a track being removed is a wrong edit, and this
+        refuses it instead of quietly acting on whichever track still happens
+        to hold that note id.
+        """
+        if self._song is None:
+            raise ValueError("no song is open -- open a MIDI file first")
+        track = self._song.track_by_id(track_id)
+        if track is None:
+            raise ValueError("no track %r in this song" % (track_id,))
+        note = next((n for n in track.notes if n.id == note_id), None)
+        if note is None:
+            raise ValueError("no note %r on track %r" % (note_id, track_id))
+        return track, note
+
+    @staticmethod
+    def _require_midi_value(value, what: str) -> int:
+        """A MIDI-range integer (0-127): a written pitch or a velocity.
+
+        A bool is refused explicitly -- `isinstance(True, int)` is true in
+        Python, so `False` would otherwise pass as pitch 0 and nobody asked
+        for that note.
+        """
+        if isinstance(value, bool):
+            raise ValueError("%s is %r; it has to be a MIDI value from 0 to 127" % (what, value))
+        try:
+            number = int(value)
+            exact = float(value) == number
+        except (TypeError, ValueError):
+            exact = False
+        if not exact or not (0 <= number <= 127):
+            raise ValueError("%s is %r; it has to be a MIDI value from 0 to 127" % (what, value))
+        return number
+
+    @staticmethod
+    def _require_ms(value, what: str, *, minimum: int) -> int:
+        """A whole number of milliseconds, at or above `minimum`."""
+        if isinstance(value, bool):
+            raise ValueError(
+                "%s is %r; it has to be a whole number of milliseconds" % (what, value)
+            )
+        try:
+            number = int(value)
+            exact = float(value) == number
+        except (TypeError, ValueError):
+            exact = False
+        if not exact or number < minimum:
+            raise ValueError(
+                "%s is %r; it has to be a whole number of milliseconds, %d or more"
+                % (what, value, minimum)
+            )
+        return number
+
+    def move_note(self, track_id, note_id, start_ms, pitch) -> None:
+        """Move a note to a new start time and written pitch.
+
+        Both move together because that is what a body-drag on the roll IS --
+        the roll never asks for one without the other -- and one undo step
+        should put both back rather than leaving a half-dragged note one
+        Ctrl+Z away from where it actually started.
+        """
+        with self._lock:
+            track, note = self._track_and_note(track_id, note_id)
+            start_ms = self._require_ms(start_ms, "start_ms", minimum=0)
+            pitch = self._require_midi_value(pitch, "pitch")
+            before = (note.start_ms, note.pitch)
+            after = (start_ms, pitch)
+
+            def _apply():
+                note.start_ms, note.pitch = after
+
+            def _revert():
+                note.start_ms, note.pitch = before
+
+            _apply()
+            self.push_command("Move note", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def resize_note(self, track_id, note_id, duration_ms) -> None:
+        """Change a note's written duration, keeping its start and pitch.
+
+        Duration alone: dragging a note's right edge never moves its start, so
+        this asks for exactly the one number that gesture produces. Duration
+        does not move a note's pitch or its position in a channel's pitch
+        histogram, so unlike `move_note` and `delete_note` this does not
+        re-derive the analysis.
+        """
+        with self._lock:
+            track, note = self._track_and_note(track_id, note_id)
+            duration_ms = self._require_ms(duration_ms, "duration_ms", minimum=1)
+            before = note.duration_ms
+
+            def _apply():
+                note.duration_ms = duration_ms
+
+            def _revert():
+                note.duration_ms = before
+
+            _apply()
+            self.push_command("Resize note", revert=_revert, apply=_apply)
+
+    def delete_note(self, track_id, note_id) -> None:
+        """Remove a note from its track, and remember exactly where it sat.
+
+        `index` is captured before the removal so undo reinserts the note at
+        the same position in `track.notes` rather than at the end. Nothing
+        downstream reads that position as meaning -- the compiler and the
+        preview both re-sort before a byte is written or a note is scheduled
+        -- but putting a restored note back exactly where it was is still the
+        more honest undo of the two, and it is free to do.
+        """
+        with self._lock:
+            track, note = self._track_and_note(track_id, note_id)
+            index = track.notes.index(note)
+
+            def _apply():
+                if note in track.notes:
+                    track.notes.remove(note)
+
+            def _revert():
+                if note not in track.notes:
+                    track.notes.insert(min(index, len(track.notes)), note)
+
+            _apply()
+            self.push_command("Delete note", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def set_note_velocity(self, track_id, note_id, velocity) -> None:
+        """Change a note's written MIDI velocity.
+
+        Velocity feeds the note's baseline loudness (`expression.midi_velocity_db`);
+        it is a fact about how hard the note was struck, not the same thing as
+        the Note volume override the inspector already exposes, which replaces
+        that baseline rather than describing it. Like `resize_note`, this does
+        not touch a channel's pitch histogram, so the analysis is left alone.
+        """
+        with self._lock:
+            track, note = self._track_and_note(track_id, note_id)
+            velocity = self._require_midi_value(velocity, "velocity")
+            before = note.velocity
+
+            def _apply():
+                note.velocity = velocity
+
+            def _revert():
+                note.velocity = before
+
+            _apply()
+            self.push_command("Change note velocity", revert=_revert, apply=_apply)
+
     # ---- the document ----
 
     def settings(self) -> dict:
@@ -507,6 +665,19 @@ class Session:
             scheduled_notes = list(prepared.shared_decaying) + list(prepared.isolated)
             scheduled_ids = {id(note) for note in scheduled_notes}
 
+            def _track_id_for(note):
+                """The `Track.id` a resolved note came from, or None.
+
+                A resolved note only carries `track`/`chan` (the MIDI
+                identity `pipeline.py` duck-types on), because the export and
+                preview core stays MIDI-agnostic. This is the one place that
+                identity is turned back into the song's own track, and only
+                for the window -- nothing downstream of `pipeline.resolve`
+                needs it.
+                """
+                owner = self._song.track_for_part(getattr(note, "track", 0), note.chan)
+                return owner.id if owner is not None else None
+
             def _event_payload(note, *, converted):
                 midi_end = max(note.start, getattr(note, "midi_end", note.end))
                 sustain_limit_visual_end = getattr(note, "sustain_limit_visual_end", None)
@@ -553,6 +724,14 @@ class Session:
                     # nothing can select, dim, or mute one of them.
                     "part": "%d:%d" % (getattr(note, "track", 0), note.chan),
                     "track": getattr(note, "track", 0),
+                    # The stable `Track.id` this note lives on, distinct from
+                    # `part`/`track` above: those name a MIDI identity
+                    # (source track + channel), while `move_note`/
+                    # `resize_note`/`delete_note`/`set_note_velocity` need the
+                    # song's own track identity to find the note at all --
+                    # `Track.notes` is the only place a note is stored, with
+                    # no flat index across the song.
+                    "track_id": _track_id_for(note),
                     "source_pitch": note.source_pitch,
                     "pitch": note.source_pitch,
                     "velocity": note.velocity,

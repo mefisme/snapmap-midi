@@ -814,10 +814,10 @@ class Bridge:
     def undo(self) -> dict:
         """Take back the last structural change, and redraw from what is left.
 
-        Nothing pushes onto the history yet -- no structural edit exists until
-        the next phase -- so today this answers "there was nothing to undo".
-        It is here now because the window's Edit menu and its Ctrl+Z have to
-        bind to something that already behaves correctly when empty.
+        Moving, resizing, deleting or retyping a note's velocity are the
+        structural edits that push onto this now. `history` names what was
+        undone, or None when there was nothing to take back -- the window's
+        Edit menu and its Ctrl+Z bind to this either way.
         """
         try:
             payload = {"ok": True, "history": self._session.undo()}
@@ -830,6 +830,54 @@ class Bridge:
         """Put back the last undone change."""
         try:
             payload = {"ok": True, "history": self._session.redo()}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    # ---- editing notes ----
+
+    def move_note(self, track_id, note_id, start_ms, pitch) -> dict:
+        """Move a note to a new start time and written pitch.
+
+        Answers with the same `_state()` shape `apply_settings`/`undo`/`redo`
+        already do, rather than a bespoke one, because the window's `adopt()`
+        sequence guard already knows how to reconcile that shape and nothing
+        about a structural edit needs a payload of its own.
+        """
+        try:
+            self._session.move_note(track_id, note_id, start_ms, pitch)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def resize_note(self, track_id, note_id, duration_ms) -> dict:
+        """Change a note's written duration, keeping its start and pitch."""
+        try:
+            self._session.resize_note(track_id, note_id, duration_ms)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def delete_note(self, track_id, note_id) -> dict:
+        """Remove a note from its track."""
+        try:
+            self._session.delete_note(track_id, note_id)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def set_note_velocity(self, track_id, note_id, velocity) -> dict:
+        """Change a note's written MIDI velocity."""
+        try:
+            self._session.set_note_velocity(track_id, note_id, velocity)
+            payload = {"ok": True}
             payload.update(self._state())
             return payload
         except Exception as exc:

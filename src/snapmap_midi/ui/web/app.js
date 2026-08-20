@@ -103,6 +103,16 @@
   var LANE_DRAW_FRAME = null;
   var SEEK_DRAG = null;
   var NOTE_POINTER = null;
+  // A body-drag (move) or right-edge-drag (resize) in progress on the
+  // detailed roll, or null when the pointer is doing anything else -- seeking,
+  // hovering, or nothing at all. Mutually exclusive with SEEK_DRAG: a
+  // pointerdown either starts a note edit or starts a seek, never both.
+  var NOTE_DRAG = null;
+  // How close the pointer has to be to a note's right edge, in CSS pixels, to
+  // grab its resize handle instead of its body. A few pixels wide, same as
+  // the plan calls for -- wide enough to hit without narrowing the body zone
+  // enough to make an ordinary short note hard to move.
+  var NOTE_RESIZE_HANDLE_PX = 6;
   var PANE_SPLIT_DRAG = null;
   var TRACKS_PREFERRED_WIDTH = TRACKS_DEFAULT_WIDTH;
   var CANVAS_RESIZE_QUEUED = false;
@@ -2683,6 +2693,23 @@
     return lines;
   }
 
+  // Quantizes a raw millisecond position to the nearest grid line, using the
+  // same tempo/tick math `timingLinesAt` uses to place the lines it draws --
+  // that function is scoped to a visible pixel range and returns pixels, not
+  // a millisecond a drag can quantize to, so this repeats its `gridTicks`
+  // formula rather than calling it. Snapping happens in TICKS, not linear
+  // milliseconds, so a snap point lands on the same beat under a tempo change
+  // as it would without one.
+  function snappedTimeMs(rawMs) {
+    var timing = timingManifest();
+    var ticksPerBeat = Number(timing.ticks_per_beat) || 480;
+    var gridTicks = ticksPerBeat * 4 / Math.max(1, activeGridDenominator());
+    if (!isFinite(gridTicks) || gridTicks <= 0) { return Math.max(0, rawMs); }
+    var tick = tickAtTime(Math.max(0, Number(rawMs) || 0));
+    var snappedTick = Math.round(tick / gridTicks) * gridTicks;
+    return Math.max(0, timeAtTick(snappedTick));
+  }
+
   function timingLines() {
     var timing = timingManifest();
     var viewport = el('pianoRollViewport');
@@ -3407,18 +3434,33 @@
 
   function positionFromCanvas(event) { return positionFromClientX(event.clientX); }
 
+  // The row math every draw already inlines as `(127 - pitch) * ROLL.rowHeight
+  // - scrollTop`, solved for pitch instead of pixels. Reads the viewport's own
+  // rect for the same reason `positionFromClientX` does: the canvas is
+  // position:sticky at the viewport's origin, so the two are interchangeable
+  // and the viewport is what every other seek helper already reads.
+  function pitchFromClientY(clientY) {
+    var viewport = el('pianoRollViewport');
+    var rect = viewport.getBoundingClientRect();
+    var y = clientY - rect.top + viewport.scrollTop;
+    return clamp(127 - Math.floor(y / ROLL.rowHeight), 0, 127);
+  }
+
   function updateNotePointer(event) {
     NOTE_POINTER = { clientX: event.clientX, clientY: event.clientY };
-    el("pianoRoll").classList.toggle(
-      "note-hover",
-      !!hoveredRenderEvent(el("pianoRoll"))
-    );
+    var canvas = el("pianoRoll");
+    var hit = hoveredRenderEvent(canvas);
+    canvas.classList.toggle("note-hover", !!hit);
+    // Advertise the resize handle before a drag ever starts -- the same zone
+    // beginNoteDrag will grab on pointerdown, so the cursor never promises a
+    // gesture the click will not deliver.
+    canvas.classList.toggle("note-resize", !!hit && noteEdgeZone(hit) === "resize");
     queueDraw();
   }
 
   function clearNotePointer() {
     NOTE_POINTER = null;
-    el("pianoRoll").classList.remove("note-hover");
+    el("pianoRoll").classList.remove("note-hover", "note-resize");
     queueDraw();
   }
 
@@ -3498,6 +3540,131 @@
     SEEK_DRAG.frame = requestAnimationFrame(continueCanvasSeekScroll);
   }
 
+  // Whether a pointer sitting at `hit`'s geometry is over the note's body
+  // (move) or its last few pixels (resize) -- the SAME test whether it is
+  // asked while just hovering (for the cursor) or on pointerdown (to decide
+  // which drag begins), so the cursor never advertises a zone the click
+  // would not honor.
+  function noteEdgeZone(hit) {
+    var point = pianoRollPointer(el('pianoRoll'));
+    if (!point) { return 'move'; }
+    var edge = hit.geometry.x + hit.geometry.width;
+    return point.x >= edge - NOTE_RESIZE_HANDLE_PX ? 'resize' : 'move';
+  }
+
+  // Rewrites the ONE display-event object a hit came from -- the same object
+  // `STATE.preview.display_events` already holds, per `record.source` in
+  // `eventRenderIndex` -- so the roll redraws instantly without a round trip.
+  // `invalidatePreviewRenderCache` is required, not optional: the render
+  // index copies these fields onto its own records once when built, so a
+  // mutation here is invisible until that cache is thrown away.
+  function applyNoteDragTiming(startMs, durationMs, pitch) {
+    var source = NOTE_DRAG.event;
+    var end = Math.round(startMs) + Math.max(1, Math.round(durationMs));
+    source.start = Math.round(startMs);
+    source.end = end;
+    source.midi_end = end;
+    source.visual_end = end;
+    source.pitch = pitch;
+    source.source_pitch = pitch;
+    invalidatePreviewRenderCache();
+    queueDraw();
+    if (NOTE_INSPECTOR_OPEN && SELECTED_NOTE_ID === source.id) { syncNoteInspector(); }
+  }
+
+  // Puts the dragged note's local copy back exactly where it started --
+  // used when a drag ends with no real change (so nothing is sent) and when
+  // a commit fails or a pointer is lost mid-drag (so a rejected or abandoned
+  // edit never lingers on screen as if it had taken).
+  function revertNoteDrag(drag) {
+    applyNoteDragTiming(drag.startBase, drag.durationBase, drag.pitchBase);
+  }
+
+  function beginNoteDrag(event, hit, kind) {
+    var source = hit.record.source;
+    if (!source || !source.id) { return; }
+    openNoteInspector(source.id);
+    if (!source.track_id) {
+      // No owning track could be resolved for this note. Selection above
+      // still stands; there is nothing to hand the bridge, so no drag starts.
+      return;
+    }
+    var writtenEnd = Number(
+      source.midi_end !== undefined && source.midi_end !== null ? source.midi_end : source.end
+    );
+    var canvas = el('pianoRoll');
+    NOTE_DRAG = {
+      pointer: event.pointerId,
+      kind: kind,
+      target: canvas,
+      trackId: source.track_id,
+      noteId: source.id,
+      event: source,
+      startBase: Number(source.start) || 0,
+      pitchBase: Number(source.pitch) || 0,
+      durationBase: Math.max(1, writtenEnd - (Number(source.start) || 0)),
+      anchorTimeMs: positionFromClientX(event.clientX),
+      anchorPitch: pitchFromClientY(event.clientY)
+    };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.toggle('note-resize', kind === 'resize');
+  }
+
+  function updateNoteDragMove(event) {
+    var currentTimeMs = positionFromClientX(event.clientX);
+    var currentPitch = pitchFromClientY(event.clientY);
+    var rawStart = NOTE_DRAG.startBase + (currentTimeMs - NOTE_DRAG.anchorTimeMs);
+    var newPitch = clamp(NOTE_DRAG.pitchBase + (currentPitch - NOTE_DRAG.anchorPitch), 0, 127);
+    applyNoteDragTiming(snappedTimeMs(rawStart), NOTE_DRAG.durationBase, newPitch);
+  }
+
+  function updateNoteDragResize(event) {
+    var snappedEnd = snappedTimeMs(positionFromClientX(event.clientX));
+    var duration = Math.max(1, Math.round(snappedEnd - NOTE_DRAG.startBase));
+    applyNoteDragTiming(NOTE_DRAG.startBase, duration, NOTE_DRAG.pitchBase);
+  }
+
+  // The one bridge call a drag makes, fired once on pointerup rather than per
+  // pointermove -- the same local-optimistic-then-commit shape every other
+  // drag in this app already uses (see `applyOptimisticMixPatch`'s doc
+  // comment). A response that fails, or never arrives, reverts the local
+  // note rather than leaving an edit on screen nothing ever agreed to.
+  function commitNoteDrag(drag) {
+    if (!api()) { revertNoteDrag(drag); return; }
+    var sequence = nextRequest();
+    setBusy(true, drag.kind === 'resize' ? 'Resizing note...' : 'Moving note...');
+    var duration = Math.round(drag.event.midi_end - drag.event.start);
+    var call = drag.kind === 'resize'
+      ? api().resize_note(drag.trackId, drag.noteId, duration)
+      : api().move_note(
+        drag.trackId, drag.noteId, Math.round(drag.event.start), Math.round(drag.event.pitch)
+      );
+    call.then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); revertNoteDrag(drag); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) {
+      setBusy(false);
+      fail(error);
+      revertNoteDrag(drag);
+      render();
+    });
+  }
+
+  function endNoteDrag(event) {
+    var drag = NOTE_DRAG;
+    NOTE_DRAG = null;
+    try { drag.target.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    drag.target.classList.remove('note-resize');
+    if (event.type === 'pointercancel') { revertNoteDrag(drag); clearNotePointer(); return; }
+    var moved = drag.kind === 'resize'
+      ? Math.round(drag.event.midi_end - drag.event.start) !== drag.durationBase
+      : (drag.event.start !== drag.startBase || drag.event.pitch !== drag.pitchBase);
+    if (!moved) { updateNotePointer(event); return; }
+    commitNoteDrag(drag);
+  }
+
   function beginCanvasSeek(event) {
     if (!hasSong()) { return; }
     NOTE_POINTER = { clientX: event.clientX, clientY: event.clientY };
@@ -3505,7 +3672,7 @@
     if (hit && hit.record && hit.record.id) {
       event.preventDefault();
       pausePlayback();
-      openNoteInspector(hit.record.id);
+      beginNoteDrag(event, hit, noteEdgeZone(hit));
       return;
     }
     beginTimelineSeek(event, true);
@@ -3517,12 +3684,21 @@
   }
 
   function moveCanvasSeek(event) {
+    if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
+      if (NOTE_DRAG.kind === 'resize') { updateNoteDragResize(event); }
+      else { updateNoteDragMove(event); }
+      return;
+    }
     if (!SEEK_DRAG || SEEK_DRAG.pointer !== event.pointerId) { return; }
     SEEK_DRAG.clientX = event.clientX;
     setPosition(positionFromClientX(event.clientX), false);
   }
 
   function endCanvasSeek(event) {
+    if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
+      endNoteDrag(event);
+      return;
+    }
     if (!SEEK_DRAG || SEEK_DRAG.pointer !== event.pointerId) { return; }
     var resume = SEEK_DRAG.resume;
     var target = SEEK_DRAG.target;
@@ -3532,6 +3708,26 @@
     if (resume) { startPlayback(); }
     else if (event.type === 'pointercancel') { clearNotePointer(); }
     else if (target === el('pianoRoll')) { updateNotePointer(event); }
+  }
+
+  // Delete/Backspace's target: whichever note is selected, regardless of
+  // whether that selection came from a click, a drag, or the inspector still
+  // being open from an earlier one.
+  function deleteSelectedNote() {
+    if (!api() || !SELECTED_NOTE_ID) { return; }
+    var note = noteEventById(SELECTED_NOTE_ID);
+    if (!note || !note.track_id) { return; }
+    var trackId = note.track_id;
+    var noteId = note.id;
+    var sequence = nextRequest();
+    setBusy(true, 'Deleting note...');
+    api().delete_note(trackId, noteId).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      if (SELECTED_NOTE_ID === noteId) { closeNoteInspector(); }
+      adopt(response, sequence);
+      render();
+    }, function (error) { setBusy(false); fail(error); render(); });
   }
 
   /* --------------------------------------------------------------- audio */
@@ -6001,6 +6197,22 @@
     el("noteSourcePitch").textContent =
       noteName(note.source_pitch) + " (" + note.source_pitch + ")";
     el("noteSound").textContent = String(note.sound || "");
+
+    // The note itself, as written -- editable here the same way a drag on
+    // the roll edits it, and kept in sync with one so either path shows the
+    // other's work.
+    var writtenPitch = Math.round(Number(note.pitch)) || 0;
+    el("noteWrittenPitch").value = String(writtenPitch);
+    el("noteWrittenPitchName").textContent = noteName(writtenPitch);
+    el("noteStartMs").value = String(Math.round(Number(note.start) || 0));
+    var writtenEnd = Number(
+      note.midi_end !== undefined && note.midi_end !== null ? note.midi_end : note.end
+    );
+    el("noteDurationMs").value = String(
+      Math.max(1, Math.round(writtenEnd - (Number(note.start) || 0)))
+    );
+    el("noteVelocity").value = String(Math.round(Number(note.velocity)) || 0);
+
     var activePitch = note.pitch_semitones;
     if (activePitch === null || activePitch === undefined) {
       activePitch = note.pitch_follow && note.automatic_pitch !== null &&
@@ -6085,8 +6297,56 @@
     applyPatch({ notes: notePatch }, true);
   }
 
+  // The inspector's Written note fields go through the structural bridge
+  // calls, not `applyPatch`: pitch/start/duration/velocity are song data, not
+  // settings-document fields, so `apply_settings` has nothing to merge them
+  // into. On failure the fields are simply resynced from the song's actual
+  // state rather than left showing the rejected value.
+  function commitNoteField(kind, args) {
+    if (!api()) { return; }
+    var note = selectedNoteEvent();
+    if (!note || !note.track_id) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Updating note...');
+    var call;
+    if (kind === 'move') { call = api().move_note(note.track_id, note.id, args.start, args.pitch); }
+    else if (kind === 'resize') { call = api().resize_note(note.track_id, note.id, args.duration); }
+    else { call = api().set_note_velocity(note.track_id, note.id, args.velocity); }
+    call.then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); syncNoteInspector(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) { setBusy(false); fail(error); syncNoteInspector(); });
+  }
+
   function initNoteInspector() {
     el("closeNoteInspector").addEventListener("click", closeNoteInspector);
+    el("noteWrittenPitch").addEventListener("change", function () {
+      var note = selectedNoteEvent();
+      if (!note) { return; }
+      var pitch = clamp(Math.round(Number(this.value) || 0), 0, 127);
+      this.value = String(pitch);
+      commitNoteField('move', { start: Math.round(Number(note.start) || 0), pitch: pitch });
+    });
+    el("noteStartMs").addEventListener("change", function () {
+      var note = selectedNoteEvent();
+      if (!note) { return; }
+      var start = Math.max(0, Math.round(Number(this.value) || 0));
+      this.value = String(start);
+      commitNoteField('move', { start: start, pitch: Math.round(Number(note.pitch) || 0) });
+    });
+    el("noteDurationMs").addEventListener("change", function () {
+      var duration = Math.max(1, Math.round(Number(this.value) || 1));
+      this.value = String(duration);
+      commitNoteField('resize', { duration: duration });
+    });
+    el("noteVelocity").addEventListener("change", function () {
+      var velocity = clamp(Math.round(Number(this.value) || 0), 0, 127);
+      this.value = String(velocity);
+      commitNoteField('velocity', { velocity: velocity });
+    });
+    el("deleteNoteButton").addEventListener("click", deleteSelectedNote);
     var sendPitch = debounce(function (value, noteId, key) {
       updateNoteOverride(noteId, key, value);
     }, 180);
@@ -6262,6 +6522,36 @@
       stamp(baseName(response.destination));
       if (response.sidecar_error) { toast(response.sidecar_error, 'warn'); }
     }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function undoLastEdit() {
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Undoing...');
+    api().undo().then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+      if (response.history && response.history.undone) {
+        stamp('Undid ' + response.history.undone);
+      }
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function redoLastEdit() {
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Redoing...');
+    api().redo().then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+      if (response.history && response.history.redone) {
+        stamp('Redid ' + response.history.redone);
+      }
+    }, function (error) { setBusy(false); fail(error); render(); });
   }
 
   function refreshAudio() {
@@ -6724,11 +7014,20 @@
       else if (key === 'r') { event.preventDefault(); reopenMidi(); }
       else if (key === 'o') { event.preventDefault(); openProject(); }
       else if (key === 's') { event.preventDefault(); saveProject(); }
+      else if (key === 'z') { event.preventDefault(); undoLastEdit(); }
+      else if (key === 'y') { event.preventDefault(); redoLastEdit(); }
       else if (event.key === ',') { event.preventDefault(); openInspector(); }
       return;
     }
     if (!typing && event.code === 'Space') { event.preventDefault(); togglePlayback(); }
     if (!editing && event.key === 'Home') { event.preventDefault(); pausePlayback(); setPosition(0); }
+    // Only when a note is actually selected and nothing is mid-edit in a
+    // field -- the same guard Space already uses, so Delete still deletes
+    // text in the note inspector's own number fields rather than the note.
+    if (!editing && (event.key === 'Delete' || event.key === 'Backspace') && SELECTED_NOTE_ID) {
+      event.preventDefault();
+      deleteSelectedNote();
+    }
   }
 
   function focusWorkspaceKeyboard() {

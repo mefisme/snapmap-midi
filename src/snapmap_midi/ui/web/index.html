@@ -498,6 +498,18 @@
 
       <div class="control-group">
         <div class="control-title">
+          <span>Written note</span>
+          <span class="hint">structural edit</span>
+        </div>
+        <div class="expression-readout control-description">Moves, resizes or retypes the note itself -- the same edit as dragging it on the roll. The Pitch and Note volume controls below only change how it plays back.</div>
+        <div class="threshold-line"><label for="noteWrittenPitch">Written pitch</label><input type="number" id="noteWrittenPitch" min="0" max="127" step="1"><span class="mono" id="noteWrittenPitchName"></span></div>
+        <div class="threshold-line"><label for="noteStartMs">Start</label><input type="number" id="noteStartMs" min="0" step="1"><span class="unit">ms</span></div>
+        <div class="threshold-line"><label for="noteDurationMs">Duration</label><input type="number" id="noteDurationMs" min="1" step="1"><span class="unit">ms</span></div>
+        <div class="threshold-line"><label for="noteVelocity">Velocity</label><input type="number" id="noteVelocity" min="0" max="127" step="1"><span class="unit">MIDI</span></div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-title">
           <label for="notePitchRange">Pitch</label>
           <span class="hint" id="notePitchMode">Manual / semitones</span>
         </div>
@@ -522,7 +534,7 @@
 
       <div class="expression-warning" id="noteClampNotice" hidden></div>
     </div>
-    <div class="inspector-foot"><button type="button" class="btn" id="resetNoteExpression">Reset note</button></div>
+    <div class="inspector-foot"><button type="button" class="btn" id="resetNoteExpression">Reset note</button><button type="button" class="btn" id="deleteNoteButton">Delete note</button></div>
   </aside>
 
   <div class="statusbar">

@@ -906,6 +906,212 @@ def test_global_preview_reports_missing_used_samples_without_failing_the_bridge(
     assert bridge.preview_samples(used) == {"ok": True, "samples": {}, "missing": used}
 
 
+# ---- editing notes ----
+
+
+def _first_note(bridge):
+    """A note id and the `track_id` that owns it, read off the live preview."""
+    event = bridge.preview_manifest()["preview"]["display_events"][0]
+    return event["track_id"], event["id"]
+
+
+def test_moving_a_note_changes_its_start_and_pitch():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    result = bridge.move_note(track_id, note_id, before["start"] + 240, before["pitch"] + 3)
+    assert result["ok"] is True
+    after = next(e for e in result["preview"]["display_events"] if e["id"] == note_id)
+    assert after["start"] == before["start"] + 240
+    assert after["pitch"] == before["pitch"] + 3
+
+
+def test_moving_a_note_on_an_unknown_track_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    _, note_id = _first_note(bridge)
+    result = bridge.move_note("t:no-such-track", note_id, 0, 60)
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_moving_an_unknown_note_on_a_real_track_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    result = bridge.move_note(track_id, "n:no-such-note", 0, 60)
+    assert result["ok"] is False
+    assert "n:no-such-note" in result["error"]
+
+
+def test_a_pitch_outside_midi_range_is_refused_and_changes_nothing():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = bridge.preview_manifest()
+    result = bridge.move_note(track_id, note_id, 0, 200)
+    assert result["ok"] is False
+    assert "0 to 127" in result["error"]
+    assert bridge.preview_manifest() == before
+
+
+def test_moving_a_note_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.move_note(track_id, note_id, before["start"] + 480, before["pitch"] + 5)
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Move note"
+    restored = next(e for e in undone["preview"]["display_events"] if e["id"] == note_id)
+    assert restored["start"] == before["start"]
+    assert restored["pitch"] == before["pitch"]
+
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Move note"
+    reapplied = next(e for e in redone["preview"]["display_events"] if e["id"] == note_id)
+    assert reapplied["start"] == before["start"] + 480
+    assert reapplied["pitch"] == before["pitch"] + 5
+
+
+def test_resizing_a_note_changes_its_duration_and_keeps_its_start():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    result = bridge.resize_note(track_id, note_id, 333)
+    assert result["ok"] is True
+    after = next(e for e in result["preview"]["display_events"] if e["id"] == note_id)
+    assert after["start"] == before["start"]
+    assert after["midi_end"] == before["start"] + 333
+
+
+def test_resizing_to_a_non_positive_duration_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    result = bridge.resize_note(track_id, note_id, 0)
+    assert result["ok"] is False
+    assert "millisecond" in result["error"]
+
+
+def test_resizing_a_note_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.resize_note(track_id, note_id, 999)
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Resize note"
+    restored = next(e for e in undone["preview"]["display_events"] if e["id"] == note_id)
+    assert restored["midi_end"] == before["midi_end"]
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Resize note"
+    reapplied = next(e for e in redone["preview"]["display_events"] if e["id"] == note_id)
+    assert reapplied["midi_end"] == before["start"] + 999
+
+
+def test_deleting_a_note_removes_it_from_the_preview():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    result = bridge.delete_note(track_id, note_id)
+    assert result["ok"] is True
+    assert all(e["id"] != note_id for e in result["preview"]["display_events"])
+
+
+def test_deleting_an_unknown_note_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    result = bridge.delete_note(track_id, "n:not-real")
+    assert result["ok"] is False
+    assert "n:not-real" in result["error"]
+
+
+def test_deleting_a_note_can_be_undone_back_to_its_original_track_position():
+    """The trickiest of the four to get right: undo has to put the note back
+    on the SAME track, not just make an equivalent note reappear somewhere."""
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.delete_note(track_id, note_id)
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Delete note"
+    restored = next((e for e in undone["preview"]["display_events"] if e["id"] == note_id), None)
+    assert restored is not None
+    assert restored["track_id"] == track_id
+    assert restored["start"] == before["start"]
+    assert restored["pitch"] == before["pitch"]
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Delete note"
+    assert all(e["id"] != note_id for e in redone["preview"]["display_events"])
+
+
+def test_changing_a_notes_velocity():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    result = bridge.set_note_velocity(track_id, note_id, 40)
+    assert result["ok"] is True
+    after = next(e for e in result["preview"]["display_events"] if e["id"] == note_id)
+    assert after["velocity"] == 40
+    assert after["velocity"] != before["velocity"]
+
+
+def test_a_velocity_outside_midi_range_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    result = bridge.set_note_velocity(track_id, note_id, 128)
+    assert result["ok"] is False
+    assert "0 to 127" in result["error"]
+
+
+def test_changing_velocity_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.set_note_velocity(track_id, note_id, 77)
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Change note velocity"
+    restored = next(e for e in undone["preview"]["display_events"] if e["id"] == note_id)
+    assert restored["velocity"] == before["velocity"]
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Change note velocity"
+    reapplied = next(e for e in redone["preview"]["display_events"] if e["id"] == note_id)
+    assert reapplied["velocity"] == 77
+
+
+def test_every_note_event_carries_the_stable_track_id_the_edit_methods_need():
+    """`part`/`track` name a MIDI identity; the edit bridge methods need the
+    song's own `Track.id` instead, since that is the only thing `Song.track_by_id`
+    understands."""
+    payload = Bridge(midi=TINY_MIDI).preview_manifest()["preview"]
+    for event in payload["display_events"]:
+        assert event["track_id"]
+
+
+def test_a_note_edit_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.move_note("t:1", "n:1", 0, 60)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
 # ---- settings ----
 
 

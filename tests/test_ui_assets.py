@@ -587,8 +587,12 @@ def test_clicking_a_note_opens_the_expression_inspector_and_empty_space_still_se
     assert 'class="inspector note-inspector"' in _HTML
     assert ".channel-inspector, .note-inspector { width: 390px; }" in _CSS
     assert 'id: String(event.id || "")' in _JS
-    assert "openNoteInspector(hit.record.id)" in _JS
-    assert "pausePlayback();\n      openNoteInspector(hit.record.id)" in _JS
+    # A hit on a note now hands off to the drag machinery -- which itself
+    # opens the inspector as its selection step -- rather than opening it
+    # inline, since a click and a drag both start the same way and only
+    # pointer movement (or its absence) tells them apart.
+    assert "openNoteInspector(source.id)" in _JS
+    assert "pausePlayback();\n      beginNoteDrag(event, hit, noteEdgeZone(hit));" in _JS
     assert "SEEK_DRAG = {" in _JS
     # Shared by the roll canvas, the ruler, and the lanes -- see
     # beginTimelineSeek/moveCanvasSeek -- so a click on any of the three
@@ -607,8 +611,15 @@ def test_clicking_a_note_opens_the_expression_inspector_and_empty_space_still_se
     assert "Number(note.note_volume_db || 0)" in _JS
     assert "entry[key] = value;" in _JS
     assert "entry.volume_trim_db = null;" in _JS
-    assert "noteVelocity" not in _HTML
-    assert "Velocity " not in _JS
+    # Phase 2's Written note group: pitch/start/duration/velocity are song
+    # data edited through the structural bridge calls, not the settings
+    # document, so they get their own fields rather than joining the pitch
+    # offset/volume expression controls above.
+    assert 'id="noteWrittenPitch"' in _HTML
+    assert 'id="noteStartMs"' in _HTML
+    assert 'id="noteDurationMs"' in _HTML
+    assert 'id="noteVelocity"' in _HTML
+    assert 'id="deleteNoteButton"' in _HTML
     assert "context.strokeStyle = palette.accent" in _JS
 
 
@@ -887,8 +898,13 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
 
 def test_notes_advertise_clickability_only_when_pointer_hit_testing_finds_one():
     assert re.search(r"#pianoRoll\.note-hover\s*\{[^}]*cursor:\s*pointer", _CSS)
-    assert '"note-hover",\n      !!hoveredRenderEvent(el("pianoRoll"))' in _JS
-    assert 'el("pianoRoll").classList.remove("note-hover")' in _JS
+    # Phase 2 adds a second cursor state for the resize handle, gated on the
+    # SAME hit-test `beginNoteDrag` uses on pointerdown -- the cursor never
+    # promises a gesture the click would not actually deliver.
+    assert re.search(r"#pianoRoll\.note-resize\s*\{[^}]*cursor:\s*ew-resize", _CSS)
+    assert 'canvas.classList.toggle("note-hover", !!hit)' in _JS
+    assert 'canvas.classList.toggle("note-resize", !!hit && noteEdgeZone(hit) === "resize")' in _JS
+    assert 'el("pianoRoll").classList.remove("note-hover", "note-resize")' in _JS
 
 
 def test_preview_uses_the_compiler_pitch_and_volume_values_without_rederiving_them():

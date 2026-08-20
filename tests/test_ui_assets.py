@@ -609,10 +609,10 @@ def test_clicking_a_note_opens_the_expression_inspector_and_empty_space_still_se
     assert "beginTimelineSeek(event, false, lane);" in _JS
     assert "applyPatch({ notes: notePatch }, true)" in _JS
     assert "notePatch[SELECTED_NOTE_ID] = null" in _JS
-    assert ">Pitch</label>" in _HTML
+    assert ">Pitch override</label>" in _HTML
     assert 'id="notePitchReadout"' not in _HTML
     assert 'MIDI " + noteName(note.source_pitch) + " - "' not in _JS
-    assert ">Note volume</label>" in _HTML
+    assert ">Volume override</label>" in _HTML
     assert "Number(note.note_volume_db || 0)" in _JS
     assert "entry[key] = value;" in _JS
     assert "entry.volume_trim_db = null;" in _JS
@@ -833,8 +833,9 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert 'id="notePitchRange" min="-24" max="24" step="1"' in _HTML
     assert 'id="notePitchNumber" min="-24" max="24" step="1"' in _HTML
     assert (
-        "Adjusts this note in whole semitones. Use Sample tuning fine adjustment "
-        "for cents across the track." in _HTML
+        "Nudges this note's playback pitch in whole semitones, on top of the "
+        "track's tuning. Use Sample tuning fine adjustment for cents across "
+        "the track." in _HTML
     )
     assert 'return pitchName(value) + " (MIDI " + Math.round(Number(value)) + ")";' in _JS
     assert "function pitchAdjustment(value)" in _JS

@@ -501,7 +501,7 @@
           <span>Written note</span>
           <span class="hint">structural edit</span>
         </div>
-        <div class="expression-readout control-description">Moves, resizes or retypes the note itself -- the same edit as dragging it on the roll. The Pitch and Note volume controls below only change how it plays back.</div>
+        <div class="expression-readout control-description">Moves, resizes or retypes the note itself -- the same edit as dragging it on the roll. The Pitch override and Volume override controls below only change how it plays back.</div>
         <div class="threshold-line"><label for="noteWrittenPitch">Written pitch</label><input type="number" id="noteWrittenPitch" min="0" max="127" step="1"><span class="mono" id="noteWrittenPitchName"></span></div>
         <div class="threshold-line"><label for="noteStartMs">Start</label><input type="number" id="noteStartMs" min="0" step="1"><span class="unit">ms</span></div>
         <div class="threshold-line"><label for="noteDurationMs">Duration</label><input type="number" id="noteDurationMs" min="1" step="1"><span class="unit">ms</span></div>
@@ -510,10 +510,10 @@
 
       <div class="control-group">
         <div class="control-title">
-          <label for="notePitchRange">Pitch</label>
+          <label for="notePitchRange">Pitch override</label>
           <span class="hint" id="notePitchMode">Manual / semitones</span>
         </div>
-        <div class="expression-readout control-description">Adjusts this note in whole semitones. Use Sample tuning fine adjustment for cents across the track.</div>
+        <div class="expression-readout control-description">Nudges this note's playback pitch in whole semitones, on top of the track's tuning. Use Sample tuning fine adjustment for cents across the track.</div>
         <div class="range-number">
           <input type="range" id="notePitchRange" min="-24" max="24" step="1">
           <input type="number" id="notePitchNumber" min="-24" max="24" step="1">
@@ -522,7 +522,7 @@
 
       <div class="control-group">
         <div class="control-title">
-          <label for="noteVolumeRange">Note volume</label>
+          <label for="noteVolumeRange">Volume override</label>
           <span class="hint">dB</span>
         </div>
         <div class="range-number">

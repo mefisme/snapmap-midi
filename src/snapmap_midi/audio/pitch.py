@@ -17,7 +17,15 @@ _WINDOW = 1024
 _MIN_FREQUENCY = 40.0
 _MAX_FREQUENCY = 2000.0
 _YIN_THRESHOLD = 0.15
-_MIN_FRAME_CONFIDENCE = 0.82
+# A frame this confident stands on its own -- one such window is trusted
+# without corroboration. Below it, a window still enters the pool (real
+# acoustic samples rarely hit 0.82 even when clearly periodic -- clipping,
+# decay noise, and room tone all drag a clean difference-function dip down)
+# but only counts once enough independent windows land on the same pitch;
+# see the `needed` cluster-size check in `analyze_pcm`.
+_STRONG_FRAME_CONFIDENCE = 0.82
+_MIN_FRAME_CONFIDENCE = 0.45
+_MIN_FINAL_CONFIDENCE = 0.5
 _MIN_RMS = 0.003
 _WINDOW_FRACTIONS = (0.08, 0.2, 0.35, 0.5, 0.65, 0.8)
 
@@ -170,6 +178,50 @@ def _dominant_frequency(frame: list[float], rate: float) -> float | None:
     return peak * rate / size
 
 
+#: How much louder the second harmonic may be than the claimed fundamental
+#: before that fundamental stops being believable on its own.
+#:
+#: A real note can have a quiet fundamental -- the missing-fundamental effect is
+#: ordinary in plucked and bowed strings -- so a modest imbalance proves
+#: nothing. An imbalance this large means the frame carries essentially NO
+#: energy where the root is claimed to be, which is equally consistent with
+#: YIN having locked onto a sub-harmonic (its classic period-doubling error) and
+#: with a genuine weak fundamental. Those two readings sit exactly an octave
+#: apart and the frame cannot separate them, which is the definition of the
+#: octave ambiguity this module refuses to guess at.
+_SUBHARMONIC_IMBALANCE = 8.0
+
+
+def _fundamental_is_supported(frame: list[float], rate: float, frequency: float) -> bool:
+    """Is there real spectral energy where this candidate claims the root is?
+
+    Returns False only when the second harmonic overwhelms the claimed
+    fundamental, which marks the estimate octave-ambiguous rather than wrong:
+    the caller drops it to "ambiguous" so a user supplies the note by hand,
+    instead of the classifier committing to one of two readings it cannot tell
+    apart. See `_SUBHARMONIC_IMBALANCE`.
+    """
+
+    transformed = _fft(frame)
+    size = len(transformed)
+
+    def magnitude(hertz: float) -> float:
+        # A one-bin skirt each side, because the FFT bin is 7.8 Hz wide at the
+        # analysis rate and a real partial rarely lands dead centre.
+        centre = hertz * size / rate
+        low = max(1, int(centre) - 1)
+        high = min(size // 2, int(centre) + 2)
+        if high < low:
+            return 0.0
+        return max(abs(transformed[index]) for index in range(low, high + 1))
+
+    if frequency * 2.0 > _MAX_FREQUENCY:
+        return True
+    root = magnitude(frequency)
+    octave = magnitude(frequency * 2.0)
+    return octave <= _SUBHARMONIC_IMBALANCE * max(root, 1e-9)
+
+
 def analyze_pcm(rate: int, per_channel) -> tuple[PitchEstimate | None, str]:
     """Return a stable root estimate and a reason code for one decoded medium."""
 
@@ -209,6 +261,14 @@ def analyze_pcm(rate: int, per_channel) -> tuple[PitchEstimate | None, str]:
         if dominant < frequency * 0.75:
             estimates.append((frequency_to_midi(frequency), confidence, False))
             continue
+        # The guard above catches YIN reaching UP to a high partial. This one
+        # catches it reaching DOWN to a sub-harmonic, which nothing checked
+        # before: a candidate an octave below the real note passes the test
+        # above trivially, because it is below the dominant component rather
+        # than above it.
+        if not _fundamental_is_supported(values, analysis_rate, frequency):
+            estimates.append((frequency_to_midi(frequency), confidence, False))
+            continue
         estimates.append((frequency_to_midi(frequency), confidence, True))
 
     if not estimates:
@@ -227,7 +287,14 @@ def analyze_pcm(rate: int, per_channel) -> tuple[PitchEstimate | None, str]:
     spectrally_valid = sum(item[2] for item in estimates)
     if not spectrally_valid:
         return None, "harmonic_ambiguity"
-    needed = 1 if len(estimates) == 1 else max(2, math.ceil(len(estimates) * 0.6))
+    # A single window only self-confirms when it individually cleared the
+    # strong bar. A single window that only cleared the lower, coalesced bar
+    # is one lucky-looking dip, indistinguishable from noise on its own --
+    # letting it stand alone would readmit exactly the false positives the
+    # coalesced bar was supposed to only accept via cross-window agreement.
+    needed = max(2, math.ceil(len(estimates) * 0.6))
+    if len(estimates) == 1 and estimates[0][1] >= _STRONG_FRAME_CONFIDENCE:
+        needed = 1
     if len(best) < needed:
         return None, "unstable"
 
@@ -239,7 +306,7 @@ def analyze_pcm(rate: int, per_channel) -> tuple[PitchEstimate | None, str]:
     weight = sum(item[1] for item in best)
     root = sum(item[0] * item[1] for item in best) / weight
     confidence = min(1.0, weight / len(best) * len(best) / len(estimates))
-    if confidence < 0.75:
+    if confidence < _MIN_FINAL_CONFIDENCE:
         return None, "low_confidence"
     return PitchEstimate(root, confidence, spread, len(best)), "pitched"
 

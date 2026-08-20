@@ -95,3 +95,77 @@ def test_a_high_partial_is_not_promoted_to_the_sound_root(monkeypatch):
     assert profile["pitchable"] is False
     assert profile["root_midi"] is None
     assert profile["relative_recommended"] is True
+
+
+def test_weak_but_consistent_windows_resolve_a_root(monkeypatch):
+    # Real acoustic media (decay noise, mild clipping, a plucked string's
+    # transient) rarely clears the strong per-frame bar even when clearly,
+    # consistently periodic across the whole clip. Cross-window agreement --
+    # several independent windows landing on the same pitch -- is trusted in
+    # its place instead of demanding one frame be individually confident.
+    monkeypatch.setattr(pitch, "_yin", lambda frame, rate: (110.0, 0.55))
+    monkeypatch.setattr(pitch, "_dominant_frequency", lambda frame, rate: 220.0)
+
+    estimate, reason = pitch.analyze_pcm(_RATE, [_tone(110.0)])
+    assert reason == "pitched"
+    assert estimate is not None
+    assert estimate.root_midi == pytest.approx(pitch.frequency_to_midi(110.0), abs=0.05)
+
+
+def test_a_subharmonic_candidate_is_refused_rather_than_guessed(monkeypatch):
+    """YIN's classic failure is period doubling: it reports a note an octave
+    BELOW the real one. The existing guard only catches it reaching UP to a
+    high partial -- a sub-harmonic sits below the dominant component and sails
+    through that check.
+
+    A frame with no energy at the claimed root but plenty an octave up is
+    equally consistent with a sub-harmonic error and with a genuine weak
+    fundamental. Those readings are an octave apart and the frame cannot
+    separate them, so the module's own rule applies: prefer "unknown" to a
+    plausible wrong octave. Reported live as `Play_sfx_stranglerstrings_02`,
+    where a 0.545-confidence root of D2 was accepted while the sample's
+    strongest component sat an octave above it at D3."""
+    rate = _RATE
+    # Energy only at 220 Hz, while YIN claims the root is an octave below.
+    frames = [_tone(220.0)]
+    monkeypatch.setattr(pitch, "_yin", lambda frame, r: (110.0, 0.95))
+    monkeypatch.setattr(pitch, "_dominant_frequency", lambda frame, r: 220.0)
+
+    estimate, reason = pitch.analyze_pcm(rate, frames)
+    assert estimate is None
+    assert reason == "harmonic_ambiguity"
+
+    profile = pitch.analyze_sources([_source(1, 220.0)])
+    assert profile["classification"] == "ambiguous"
+    assert profile["pitchable"] is False
+    assert profile["relative_recommended"] is True
+
+
+def test_a_supported_fundamental_still_resolves(monkeypatch):
+    """The guard must only fire on a genuinely unsupported root. A tone with
+    real energy at the frequency YIN reports is exactly the case it must not
+    touch."""
+    monkeypatch.setattr(pitch, "_dominant_frequency", lambda frame, r: 220.0)
+
+    estimate, reason = pitch.analyze_pcm(_RATE, [_tone(220.0)])
+    assert reason == "pitched"
+    assert estimate is not None
+    assert estimate.root_midi == pytest.approx(pitch.frequency_to_midi(220.0), abs=0.2)
+
+
+def test_a_single_weak_window_is_not_trusted_alone(monkeypatch):
+    # One window clearing only the coalesced bar is indistinguishable from a
+    # lucky-looking dip in noise. Unlike a single STRONG window, it must not
+    # stand alone -- it needs another window to agree with it first.
+    calls = {"count": 0}
+
+    def flaky_yin(frame, rate):
+        calls["count"] += 1
+        return (110.0, 0.55) if calls["count"] == 1 else None
+
+    monkeypatch.setattr(pitch, "_yin", flaky_yin)
+    monkeypatch.setattr(pitch, "_dominant_frequency", lambda frame, rate: 220.0)
+
+    estimate, reason = pitch.analyze_pcm(_RATE, [_tone(110.0)])
+    assert estimate is None
+    assert reason == "unstable"

@@ -20,16 +20,9 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from snapmap_midi.music.midi import for_part, parse_notes
-from snapmap_midi.music.voices import (
-    allocate_voices,
-    apply_glides,
-    apply_voice_cap,
-    prepare_voice_layers,
-    thin_global_polyphony,
-    thin_polyphony,
-    thin_simultaneous,
-)
+from snapmap_midi.music import importer, pipeline
+from snapmap_midi.music.midi import for_part
+from snapmap_midi.music.song import Song
 from snapmap_midi.rawmap.codec import serialize
 from snapmap_midi.rawmap.document import SnapMapDocument
 from snapmap_midi.rawmap.palette_refs import PRODUCT_PALETTE_REFS
@@ -190,6 +183,14 @@ def _write_timeline_shards(
     return shards
 
 
+#: Arguments to `compile_to_rawmap` that are not conversion levers, and so must
+#: not be swept into the levers dict below. `button_name` is here because it is
+#: accepted for API compatibility and then ignored: a MIDI export always labels
+#: its interactive with the song's own filename, so a probe or a stale sidecar
+#: name cannot leak into a later song.
+_NOT_A_LEVER = frozenset({"mid_path", "baseline_bytes", "mid", "note_index", "button_name"})
+
+
 def compile_to_rawmap(
     mid_path,
     baseline_bytes: Optional[bytes] = None,
@@ -242,22 +243,56 @@ def compile_to_rawmap(
 ):
     """Compile a MIDI file into finished map bytes plus a statistics summary.
 
-    `mid` accepts an already-parsed `mido.MidiFile`, threaded straight to
-    `parse_notes` so a caller holding one open song does not pay a fresh disk
-    read and parse on every compile.
+    A file in, bytes out, with every choice arriving as a keyword. This is the
+    command line's entry point and the library's, and its behaviour is fixed:
+    the same file and the same levers produce the same bytes they always did.
 
-    `baseline_bytes` is optional. Omit it and the song is staged in a blank
-    room authored from nothing; pass a saved map and the song is added to it,
-    reusing that map's timeline if it has one.
+    Underneath, the file is imported into a transient in-memory `Song` and that
+    song is compiled. The workstation holds its song open and edits it instead
+    of re-reading a file, but both reach the same core, which is what keeps the
+    window's export and this call from drifting apart.
 
-    ``button_name`` remains accepted for API compatibility, but MIDI exports
-    always label their interactive with ``mid_path``'s filename so a probe or
-    stale sidecar name cannot leak into a later song.
+    `mid` accepts an already-parsed `mido.MidiFile`, so a caller holding one
+    open song does not pay a fresh disk read and parse on every compile.
 
-    Channel mute/solo state and drum-key overrides are handed straight to
-    `parse_notes`; all are inert when empty, which lets the workstation pass
-    them on every compile without moving a byte.
+    `baseline_bytes` is optional. Omit it and the song is staged in a blank room
+    authored from nothing; pass a saved map and the song is added to it, reusing
+    that map's timeline if it has one.
+
+    Channel mute/solo state and drum-key overrides are handed straight through;
+    all are inert when empty, which lets the workstation pass them on every
+    compile without moving a byte.
     """
+    # Swept out of the signature rather than listed again. A lever added above
+    # and forgotten here would read as unset -- the compiler's own default
+    # standing in for something the caller explicitly asked for, silently.
+    levers = {name: value for name, value in locals().items() if name not in _NOT_A_LEVER}
+    song = importer.import_song(mid_path, mid=mid)
+    return compile_song(
+        song,
+        baseline_bytes,
+        levers=levers,
+        note_index=note_index,
+        song_name=Path(mid_path).name,
+    )
+
+
+def compile_song(
+    song: Song,
+    baseline_bytes: Optional[bytes] = None,
+    *,
+    levers: Optional[dict] = None,
+    note_index=None,
+    song_name: Optional[str] = None,
+):
+    """Compile an open song into finished map bytes plus a statistics summary.
+
+    The song says what the music is; `levers` says what to convert it with, in
+    the keywords `compile_to_rawmap` names. The workstation builds those from
+    the song's own stored choices (`music/levers.py`); the command line builds
+    them from its flags and a settings file.
+    """
+    levers = dict(levers or {})
     data = blank_map() if baseline_bytes is None else json.loads(baseline_bytes)
     doc = SnapMapDocument(data=data, palette_refs=PRODUCT_PALETTE_REFS)
     timeline = ensure_timeline(doc)
@@ -265,77 +300,41 @@ def compile_to_rawmap(
         "item[0]"
     ]["entity"]
 
-    notes, stats = parse_notes(
-        mid_path,
-        drums,
-        family_overrides,
-        decaying_families,
-        channel_families,
-        low_split,
-        drum_overrides,
+    max_speakers = levers.get("max_speakers", 32)
+    release_s = levers.get("release_s", 0.1)
+    hard_stop = levers.get("hard_stop", False)
+    part_release_s = levers.get("part_release_s") or {}
+    part_hard_stop = levers.get("part_hard_stop") or {}
+    part_attack_ms = levers.get("part_attack_ms") or {}
+
+    notes, stats = pipeline.resolve(
+        song,
+        levers,
         note_index=note_index,
-        channel_mutes=channel_mutes,
-        drum_key_overrides=drum_key_overrides,
-        channel_solos=channel_solos,
-        channel_sounds=channel_sounds,
         event_is_looping=installed_event_is_looping,
-        channel_pitch_profiles=channel_pitch_profiles,
-        part_percussion=part_percussion,
-        note_overrides=note_overrides,
-        part_volume_db=part_volume_db,
-        master_volume_db=master_volume_db,
-        part_key_range=part_key_range,
-        part_transpose=part_transpose,
-        part_pitch_octave=part_pitch_octave,
-        playback_speed=playback_speed,
-        mid=mid,
     )
     decaying = [n for n in notes if not n.sustained]
     sustained = [n for n in notes if n.sustained]
 
-    if drop_sustain_over_ms is not None:
-        sustained = [n for n in sustained if n.duration <= drop_sustain_over_ms]
-    if min_sustain_ms:
+    if levers.get("drop_sustain_over_ms") is not None:
+        sustained = [n for n in sustained if n.duration <= levers["drop_sustain_over_ms"]]
+    if levers.get("min_sustain_ms"):
         # Rapid ornaments churn emitter slots harder than anything else.
-        sustained = [n for n in sustained if n.duration >= min_sustain_ms]
-    if drop_shaders:
-        decaying = [n for n in decaying if n.shader not in drop_shaders]
+        sustained = [n for n in sustained if n.duration >= levers["min_sustain_ms"]]
+    if levers.get("drop_shaders"):
+        decaying = [n for n in decaying if n.shader not in levers["drop_shaders"]]
     decaying.sort(key=lambda n: (n.start, n.chan, n.source_pitch, n.id))
-    if max_events:
-        decaying = decaying[:max_events]
+    if levers.get("max_events"):
+        decaying = decaying[: levers["max_events"]]
 
-    part_voices = part_voices or {}
-    part_polyphony = part_polyphony or {}
-    parts = {}
-    for note in decaying + sustained:
-        parts.setdefault((getattr(note, "track", 0), note.chan), []).append(note)
-    limited_notes = []
-    for part_key in sorted(parts):
-        track, channel = part_key
-        part = parts[part_key]
-        poly = for_part(part_polyphony, track, channel, max_poly)
-        limited_notes.extend(thin_polyphony(part, poly) if poly else part)
-    limited_notes = thin_global_polyphony(limited_notes, song_polyphony)
-    decaying = [note for note in limited_notes if not note.sustained]
-    sustained = [note for note in limited_notes if note.sustained]
-
-    shared_decaying, expressive_decaying, layers = prepare_voice_layers(
-        decaying,
-        sustained,
-        cap_sustain_ms=cap_sustain_ms,
-        bass_pitch=bass_pitch,
-        bass_cap_ms=bass_cap_ms,
-        family_caps=family_caps,
-        duration_lookup=installed_event_duration_ms,
-        part_glide_ms=part_glide_ms,
-        part_attack_ms=part_attack_ms,
-        part_voices=part_voices,
-        part_sustain_ms=part_sustain_ms,
-        note_off=note_off,
-        part_note_off=part_note_off,
-        note_off_floor_ms=note_off_floor_ms,
-        part_note_off_floor_ms=part_note_off_floor_ms,
+    prepared = pipeline.prepare(
+        decaying + sustained, levers, duration_lookup=installed_event_duration_ms
     )
+    decaying, sustained = prepared.decaying, prepared.sustained
+    shared_decaying = prepared.shared_decaying
+    isolated = prepared.isolated
+    count = voices_used = peak_voices = prepared.voice_count
+
     shared_events = sorted(
         (
             _events.start(n.shader, n.start, channel=_events.LAYERED_CHANNEL)
@@ -345,24 +344,6 @@ def compile_to_rawmap(
     )
     groups = [(timeline_id, shared_events)]
     timeline_by_target = {timeline_id: timeline}
-
-    voices_used = 0
-    peak_voices = 0
-    isolated = []
-    for part_key in sorted(layers):
-        track, channel = part_key
-        layer = layers[part_key]
-        voices = for_part(part_voices, track, channel, max_speakers)
-        layer = apply_voice_cap(layer, voices)
-        isolated.extend(layer)
-
-    # Voices are one song-wide pool.  Polyphony remains a per-track editorial
-    # choice, but a global voice count must author no more than this many
-    # dedicated pitch-controlled emitters across the entire arrangement.
-    isolated = thin_simultaneous(isolated, max_speakers)
-    count = allocate_voices(isolated, max_speakers)
-    apply_glides(isolated, part_glide_ms)
-    voices_used = peak_voices = count
 
     by_voice = {}
     for n in isolated:
@@ -420,7 +401,7 @@ def compile_to_rawmap(
                 scheduled.append(_events.stop(max(previous.start, n.start - 1)))
             previous_silent_at = None
             attack_ms = int(
-                for_part(part_attack_ms or {}, getattr(n, "track", 0), n.chan, 0) or 0
+                for_part(part_attack_ms, getattr(n, "track", 0), n.chan, 0) or 0
             )
             # The game does not carry a fade state into a subsequently
             # started one-shot. Start on the exact MIDI time, then address the
@@ -498,13 +479,13 @@ def compile_to_rawmap(
                 # a fade-only capped note as cleanly as this stop makes it
                 # play in game.
                 note_release = for_part(
-                    part_release_s or {},
+                    part_release_s,
                     getattr(n, "track", 0),
                     n.chan,
                     release_s,
                 )
                 note_hard_stop = for_part(
-                    part_hard_stop or {},
+                    part_hard_stop,
                     getattr(n, "track", 0),
                     n.chan,
                     hard_stop,
@@ -530,13 +511,13 @@ def compile_to_rawmap(
                 previous_silent_at = n.end
             elif n.sustained and (following is None or following.start > n.end):
                 note_release = for_part(
-                    part_release_s or {},
+                    part_release_s,
                     getattr(n, "track", 0),
                     n.chan,
                     release_s,
                 )
                 note_hard_stop = for_part(
-                    part_hard_stop or {},
+                    part_hard_stop,
                     getattr(n, "track", 0),
                     n.chan,
                     hard_stop,
@@ -593,7 +574,8 @@ def compile_to_rawmap(
 
     trigger_ids = [trigger_ref for _entity, trigger_ref in activated_timelines]
     timeline_sizes = [len(serialize(entity)) for entity, _ref in activated_timelines]
-    song_name = Path(mid_path).name
+    if song_name is None:
+        song_name = Path(song.origin).name if song.origin else "snapmap-midi-song"
     switch_uid = add_button(doc, trigger_ids, song_name)
     layout_entities = list(timeline_by_target.values())
     layout_entities.extend(entity for entity, _trigger_ref in activated_timelines)
@@ -607,8 +589,8 @@ def compile_to_rawmap(
             "voices": voices_used,
             "events": sum(len(e) for _, e in groups),
             "shared_one_shots": len(shared_decaying),
-            "expressive_notes": len(sustained) + len(expressive_decaying),
-            "expressive_one_shots": len(expressive_decaying),
+            "expressive_notes": len(sustained) + len(prepared.expressive_decaying),
+            "expressive_one_shots": len(prepared.expressive_decaying),
             "expressive_voices": voices_used,
             "long_sustains": sum(1 for n in sustained if n.duration > 1000),
             "peak_voices": peak_voices,

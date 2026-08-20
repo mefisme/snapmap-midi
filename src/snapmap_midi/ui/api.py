@@ -39,6 +39,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from snapmap_midi import project
 from snapmap_midi import settings as settings_module
 from snapmap_midi.music import gm
 from snapmap_midi.music.gm import gm_drum_name
@@ -52,6 +53,10 @@ _MIDI_TYPES = ("MIDI files (*.mid;*.midi)", "All files (*.*)")
 
 #: A saved map is JSON, and the loader's own is literally `rawmap.json`.
 _MAP_TYPES = ("Saved maps (*.json)", "All files (*.*)")
+
+#: A saved project. The second entry is there for the same reason the MIDI
+#: picker's is: a file somebody renamed is still their project.
+_PROJECT_TYPES = ("snapmap-midi projects (*%s)" % project.PROJECT_SUFFIX, "All files (*.*)")
 
 #: The complete stock event-name alphabet and measured maximum length.
 _PLAY_EVENT = re.compile(r"(?i)^play_[a-z0-9_-]{1,59}$")
@@ -749,6 +754,84 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    # ---- the project ----
+
+    def save_project(self, path=None) -> dict:
+        """Write the open song to its own file, and say where it went.
+
+        The `.mid` is never written to. An import is a starting point, and
+        somebody who edits a song still has the file they started from -- which
+        is the entire meaning of non-destructive here.
+
+        With no path and no window, this writes beside the song under the
+        conventional name. That is not a fallback for the user's benefit; it is
+        what makes this callable from a test with no browser engine present, the
+        same reason every other dialog in this file answers None before it
+        reaches `import webview`.
+        """
+        try:
+            if path is None:
+                suggested = self._session.project_destination()
+                if self._window is not None:
+                    chosen = self._save_dialog(
+                        _PROJECT_TYPES,
+                        suggested.name if suggested else "song%s" % project.PROJECT_SUFFIX,
+                    )
+                    if chosen is None:
+                        return _cancelled()
+                    path = chosen
+                else:
+                    path = suggested
+            written = self._session.save_project(path)
+            return {"ok": True, "project": str(written)}
+        except Exception as exc:
+            return _fail(exc)
+
+    def load_project(self, path=None) -> dict:
+        """Open a saved project, and answer with everything the window redraws.
+
+        The catalog goes back with it for the same reason `load_midi` sends one:
+        `drum_names` describes the song that was open when it was built, and
+        this call is the moment that stops being true.
+        """
+        try:
+            if path is None:
+                path = self._open_dialog(_PROJECT_TYPES)
+                if path is None:
+                    return _cancelled()
+            self._session.load_project(path)
+            self._error = None
+            payload = {"ok": True, "project": str(path)}
+            payload.update(self._state())
+            payload["catalog"] = self._catalog()
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def undo(self) -> dict:
+        """Take back the last structural change, and redraw from what is left.
+
+        Nothing pushes onto the history yet -- no structural edit exists until
+        the next phase -- so today this answers "there was nothing to undo".
+        It is here now because the window's Edit menu and its Ctrl+Z have to
+        bind to something that already behaves correctly when empty.
+        """
+        try:
+            payload = {"ok": True, "history": self._session.undo()}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def redo(self) -> dict:
+        """Put back the last undone change."""
+        try:
+            payload = {"ok": True, "history": self._session.redo()}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     # ---- compiling ----
 
     def dry_run(self) -> dict:
@@ -819,6 +902,27 @@ class Bridge:
             webview.FileDialog.OPEN, directory=self._nearby(), file_types=file_types
         )
         return str(chosen[0]) if chosen else None
+
+    def _save_dialog(self, file_types, filename) -> str | None:
+        """A chosen destination, or None. Same guard, same reason.
+
+        pywebview answers a save dialog with a bare string where the open
+        dialogs answer with a tuple, so both readings are accepted rather than
+        assumed -- the wrong one silently produces a path made of one character.
+        """
+        if self._window is None:
+            return None
+        import webview
+
+        chosen = self._window.create_file_dialog(
+            webview.FileDialog.SAVE,
+            directory=self._nearby(),
+            save_filename=filename,
+            file_types=file_types,
+        )
+        if not chosen:
+            return None
+        return str(chosen) if isinstance(chosen, str) else str(chosen[0])
 
     def _folder_dialog(self) -> str | None:
         """A chosen folder, or None. Same guard, same reason."""

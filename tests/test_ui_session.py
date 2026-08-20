@@ -1226,20 +1226,20 @@ def test_changes_from_several_threads_all_land():
 
 
 def test_the_note_index_is_built_once_and_handed_to_every_compile(monkeypatch):
-    """Dropdowns fire immediately, so a re-parse per change is a re-parse per
-    click. `compile_to_rawmap` already takes `note_index`; not passing it
-    rebuilds the pitch index inside `parse_notes` on every keystroke."""
+    """Dropdowns fire immediately, so a re-derivation per change is one per
+    click. `compile_song` already takes `note_index`; not passing it rebuilds
+    the pitch index inside the resolver on every keystroke."""
     session = Session(midi=TINY_MIDI)
     assert session._note_index is not None
 
-    real = session_module.compile_to_rawmap
+    real = session_module.compile_song
     seen = []
 
     def spy(*args, **kwargs):
         seen.append(kwargs.get("note_index"))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(session_module, "compile_to_rawmap", spy)
+    monkeypatch.setattr(session_module, "compile_song", spy)
     session.stats()
     session.apply({"channels": {"0": {"family": "ins_marimba"}}})
     session.stats()

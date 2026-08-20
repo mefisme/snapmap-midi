@@ -190,6 +190,69 @@ def analyze(mid_path, drums="auto", part_percussion=None) -> MidiAnalysis:
     return MidiAnalysis(str(mid_path), round(elapsed, 2), drums_on, channels)
 
 
+def from_song(song) -> MidiAnalysis:
+    """Describe an OPEN SONG the same way `analyze` describes a file.
+
+    Same answer, asked of the thing the window is actually editing. Once a song
+    is imported the file has told us everything it is going to: re-reading it to
+    redraw a row would describe the file rather than the song, and after a note
+    is moved or a track is added those are two different arrangements. It also
+    means a saved project opens with no `.mid` present at all.
+
+    The drums switch and each track's percussion mode both live on the song, so
+    they are read from it rather than passed in -- the row that draws a kit and
+    the compile that routes it through `DRUM_MAP` cannot disagree if there is
+    only one place either can look.
+    """
+    from snapmap_midi.music.midi import written_is_percussion
+
+    declared = song.conversion.get("drums", "auto")
+    if declared == "auto":
+        # Asked of the song's own written notes rather than of a file, so a
+        # project with no `.mid` beside it still answers.
+        drums_on = written_is_percussion(
+            (track.channel, note.pitch) for track in song.tracks for note in track.notes
+        )
+    else:
+        drums_on = declared == "on"
+
+    # Read once. `drum_table` opens the user's file, and a song with twenty
+    # percussion parts would otherwise open it twenty times.
+    table = drum_table()
+    channels = []
+    for track in sorted(song.tracks, key=lambda t: t.part):
+        if not track.notes:
+            continue
+        pitches: dict = {}
+        for note in track.notes:
+            pitches[note.pitch] = pitches.get(note.pitch, 0) + 1
+        program = track.notes[0].program
+        is_drums = is_percussion_part(
+            {track.part: track.percussion}, track.source_track, track.channel, drums_on
+        )
+        channels.append(
+            ChannelInfo(
+                channel=track.channel,
+                program=program,
+                # On the percussion channel the program selects a kit, not an
+                # instrument, so the melodic name is simply the wrong table.
+                program_name=(gm_drum_kit_name(program) if is_drums else gm_program_name(program)),
+                notes=sum(pitches.values()),
+                lowest=min(pitches),
+                highest=max(pitches),
+                is_drums=is_drums,
+                auto_family=None if is_drums else gm_to_family(program),
+                pitches=pitches,
+                drum_keys={k: table.get(k) for k in sorted(pitches)} if is_drums else {},
+                track=track.source_track,
+                track_name=track.name,
+            )
+        )
+    return MidiAnalysis(
+        str(song.origin or ""), round(song.duration_ms / 1000.0, 2), drums_on, channels
+    )
+
+
 def as_dict(analysis: MidiAnalysis) -> dict:
     """The analysis as JSON, for the one consumer that cannot take it any other way.
 

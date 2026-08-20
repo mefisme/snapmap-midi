@@ -481,7 +481,7 @@
   function updateMenuState() {
     var song = hasSong();
     var audio = STATE.audio || {};
-    ['menuReopen', 'menuExport', 'menuPlay', 'menuStart'].forEach(function (id) { el(id).disabled = !song; });
+    ['menuReopen', 'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart'].forEach(function (id) { el(id).disabled = !song; });
     el('menuPlay').querySelector('span').textContent = AUDIO.playing ? 'Pause' : 'Play';
     if (audio.source === 'game' || audio.source === 'game+cache') {
       el('menuAudio').querySelector('span').textContent = 'DOOM Audio Ready';
@@ -6219,6 +6219,34 @@
     api().load_midi(STATE.settings.midi).then(function (response) { afterLoad(response, sequence); }, function (error) { setBusy(false); setMidiLoading(false); fail(error); render(); });
   }
 
+  // A project is the editable song: tracks, notes and every lever, in a file
+  // of its own beside the .mid. Saving one never writes to the .mid, so an
+  // import stays exactly what the composer handed over.
+  function saveProject() {
+    closeMenus();
+    if (!api() || !hasSong()) { return; }
+    setBusy(true, 'Saving project...');
+    api().save_project().then(function (response) {
+      setBusy(false);
+      if (response && response.cancelled) { return; }
+      if (!response || !response.ok) { fail(response); return; }
+      toast('Project saved', 'ok');
+      stamp(baseName(response.project));
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function openProject() {
+    closeMenus();
+    if (!api()) { toast('The file picker needs the desktop window', 'warn'); return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Opening project...');
+    setMidiLoading(true, 'Opening project...');
+    api().load_project().then(function (response) {
+      if (response && response.cancelled) { setBusy(false); setMidiLoading(false); render(); return; }
+      afterLoad(response, sequence);
+    }, function (error) { setBusy(false); setMidiLoading(false); fail(error); render(); });
+  }
+
   function exportMap() {
     closeMenus();
     if (!api() || !hasSong()) { return; }
@@ -6694,6 +6722,8 @@
       if (key === 'i') { event.preventDefault(); importMidi(); }
       else if (key === 'e') { event.preventDefault(); exportMap(); }
       else if (key === 'r') { event.preventDefault(); reopenMidi(); }
+      else if (key === 'o') { event.preventDefault(); openProject(); }
+      else if (key === 's') { event.preventDefault(); saveProject(); }
       else if (event.key === ',') { event.preventDefault(); openInspector(); }
       return;
     }
@@ -6807,6 +6837,8 @@
     initChrome();
     el('menuImport').addEventListener('click', importMidi);
     el('menuReopen').addEventListener('click', reopenMidi);
+    el('menuOpenProject').addEventListener('click', openProject);
+    el('menuSaveProject').addEventListener('click', saveProject);
     el('menuExport').addEventListener('click', exportMap);
     el('menuExit').addEventListener('click', function () { closeMenus(); if (api()) { api().win_close(); } });
     el('menuAudio').addEventListener('click', refreshAudio);

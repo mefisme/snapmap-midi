@@ -10,11 +10,14 @@ Modules are grouped by subsystem and stacked. Each layer may use the ones below 
 the ones above, and a test asserts exactly that.
 
 ```
-   compile.py / cli.py / settings.py / ui/  the product surface
+   compile.py / cli.py / settings.py /      the product surface
+   project.py / ui/
                   |
    audio/     locate, wwise, pitch, library installed catalog, roots, preview
                   |
-   music/     midi, gm, expression, voices  notes: pairing, timbre, expression
+   music/     song, importer, levers,       the editable song and its conversion
+              timing, pipeline
+              midi, gm, expression, voices  notes: pairing, timbre, expression
               analysis
                   |
    sound/     palette, events, timeline     sounds: names, event calls, scheduling
@@ -36,9 +39,15 @@ A compile is a straight line. Each stage owns one module, and each hands the nex
 values rather than a hidden audio or UI context.
 
 ```
-song.mid + settings v9
+song.mid                              (read ONCE, at import)
    |
    |  music/midi.py       pair events; preserve stable id, source pitch, velocity
+   |  music/importer.py   pairs -> tracks of written notes, ids clear of what is held
+   |  music/timing.py     the source clock: tempo and time-signature map
+   v
+Song  (tracks, notes, per-track levers)  + settings v23
+   |
+   |  music/levers.py     the song's stored choices -> conversion keywords
    |  music/gm.py         program -> family; channel 9 -> percussion
    |  sound/palette.py    family + source pitch -> nearest rooted sample
    v
@@ -73,6 +82,39 @@ calculation; the imported MIDI file and load-bearing serialized field order rema
 
 Percussion is detected here too. MIDI reserves channel 9 for drums, where the note number
 selects an instrument rather than a pitch.
+
+Pairing and sound choice are two functions, not one. `pair_notes` answers a question about
+the file and never changes its answer; `resolve_notes` answers a question about the user's
+choices and re-answers it on every dropdown. `parse_notes` is still the two back to back,
+which is what the command line and library callers want.
+
+### `music/song.py` — the editable document
+
+`Song` -> `Track` -> `Note`: what the workstation edits, and the only place note data lives
+once a file has been imported. Ids are assigned when a note or a track comes into existence
+and are never recomputed from position, which is what makes moving, inserting and deleting
+expressible — the old `channel:pitch:occurrence` key was a position, so inserting one note
+renumbered every later one. Every per-channel and per-note lever the settings document holds
+has a field here, and the module round-trips to JSON for the project file.
+
+Provenance is per track. A project may hold tracks imported from several `.mid` files, so
+`Track.source_midi` says which one a lane came from and a lane drawn from nothing says None.
+
+### `music/importer.py` — one file, once
+
+Turns a `.mid` into tracks that can join an existing song rather than into a whole song, so
+importing a second file adds its parts beside the first file's instead of replacing them.
+Track ids, part identities and note ids are all minted clear of what the caller already
+holds; for the first file into an empty project every one of those offsets is zero, so the
+ids match what settings sidecars already on disk name.
+
+### `music/levers.py` and `music/pipeline.py` — one conversion
+
+`levers.py` turns a song's stored per-track choices into the keyword arguments
+`compile_to_rawmap` names; `settings.py` does the same for a settings document, and a test
+resolves both per part and demands they agree. `pipeline.py` is the conversion itself —
+resolve, thin, cap, allocate — shared by the map export and the window's preview, which used
+to be two copies of the same eight steps and therefore two policies.
 
 ### `music/gm.py` — the General MIDI tables
 
@@ -214,6 +256,12 @@ that name for the pure query that returns `None`.
 
 ### `compile.py` — orchestration
 
+Two doors onto one core. `compile_song` takes an open song plus the levers to convert it
+with; `compile_to_rawmap` takes a file path and keyword levers, imports the file into a
+transient song, and calls that core. The second one's signature and bytes are contract-tested
+— `cli.py` splats its flags straight into it — so the song model sits underneath the command
+line rather than in front of it.
+
 Runs the stages above in order and returns `(bytes, statistics)`. The statistics dictionary
 is not decoration: the byte gates assert on it, so a byte difference reports *what* changed
 rather than only *that* something did.
@@ -323,9 +371,16 @@ pitch acceptance/rejection, and mod isolation without redistributing game data.
 
 A pywebview window over the library. `app.py` opens it and is the only module
 that imports pywebview at all — inside a function, so importing the package still works on a
-machine that will never open a window. `session.py` holds the loaded file, the settings
+machine that will never open a window. `session.py` holds the open SONG, the settings
 document, analysis, statistics, and resolved preview manifest behind a lock, because bridge
-calls arrive on separate threads.
+calls arrive on separate threads. The song is imported once and held; a settings patch is
+projected onto its tracks and notes rather than sending the compiler back to the file.
+`history.py` is the session-only undo stack — a linear list of do/undo pairs with a cursor,
+which structural edits push onto. `project.py`, one layer down at the surface, is the only
+module that sees both a song and a settings document: it resolves a document's wildcard
+channel entries onto the tracks they covered, writes the reverse projection when a saved
+project is opened, and reads and writes the `.smsong.json` project file. Saving a project
+never touches the `.mid`.
 `api.py` is the class pywebview exposes to Javascript; every method returns
 `{"ok": true, ...}` or `{"ok": false, "error": "..."}` and none of them raises, because an
 exception crossing that boundary reaches Javascript as an opaque `Error` with nothing worth

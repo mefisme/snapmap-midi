@@ -1,10 +1,16 @@
 """What the window is looking at: one song, one document, and one compile of them.
 
-Every control in the window is a patch to a settings document, and every number
-beside those controls comes from compiling that document. Both live here, in one
-object, so they cannot disagree: the rulers, the status line and the exported
-bytes are three readings of the same state at the same moment rather than three
-readings taken while somebody was still typing.
+The song is HELD, not re-read. It is imported once, from a `.mid` or from a
+saved project, and every compile and every preview reads it from memory
+afterwards. That is the difference between a converter and an editor: a
+converter can afford to re-parse its input, and an editor cannot, because an
+edit that has not been written back to disk would not survive the next parse.
+
+Every control in the window is a patch to a settings document, and that document
+is projected onto the song's tracks and notes the moment it changes. Both live
+here, in one object, so they cannot disagree: the rulers, the status line and the
+exported bytes are three readings of the same state at the same moment rather
+than three readings taken while somebody was still typing.
 
 The state is behind a lock because pywebview answers each Javascript call on its
 own thread. Two dropdowns changed in quick succession are two threads inside
@@ -13,8 +19,8 @@ nothing anywhere to show that it happened -- the control snaps back a beat later
 and looks like a rendering glitch.
 
 The palette's note index is built once, here, and handed to every compile.
-Dropdowns fire immediately rather than on a debounce, so a re-parse per change
-is a re-parse per click.
+Dropdowns fire immediately rather than on a debounce, so a re-derivation per
+change is a re-derivation per click.
 
 Nothing in here writes to the window and nothing imports pywebview. The bridge
 above it turns these answers into `{"ok": ...}` payloads and catches what they
@@ -25,30 +31,22 @@ browser engine present.
 from __future__ import annotations
 
 import copy
-import math
-from fractions import Fraction
 from pathlib import Path
 from threading import RLock
 
-from snapmap_midi import paths
+from snapmap_midi import paths, project
 from snapmap_midi import settings as settings_module
 from snapmap_midi.compile import (
-    compile_to_rawmap,
+    compile_song,
     installed_event_duration_ms,
     installed_event_is_looping,
 )
-from snapmap_midi.music import analysis
-from snapmap_midi.music.midi import for_part, parse_notes
-from snapmap_midi.music.voices import (
-    allocate_voices,
-    apply_glides,
-    apply_voice_cap,
-    prepare_voice_layers,
-    thin_global_polyphony,
-    thin_polyphony,
-    thin_simultaneous,
-)
+from snapmap_midi.music import analysis, pipeline
+from snapmap_midi.music import timing as timing_module
+from snapmap_midi.music.levers import compile_levers
+from snapmap_midi.music.midi import for_part
 from snapmap_midi.sound import palette
+from snapmap_midi.ui.history import Command, History
 
 #: The axis every ruler row is drawn against: MIDI's own range, which is also
 #: the widest any family reaches. Fixed rather than derived from the file,
@@ -57,122 +55,6 @@ from snapmap_midi.sound import palette
 #: would sit somewhere else on the strip for a reason that has nothing to do
 #: with it.
 _AXIS = (0, 127)
-
-#: How much of a bar past the last bar line is read as padding rather than as
-#: music. Editors routinely write End-of-Track a handful of ticks past the final
-#: bar, and a bare ceiling turns one stray tick into a whole empty measure on the
-#: ruler -- 2,000 ms of dead timeline bought with 1/1920th of a bar. A 32nd note
-#: is the smallest division the roll draws, so content shorter than that is not
-#: content. A genuinely incomplete final measure is far larger than this and
-#: still earns its bar.
-_GRID_PADDING_BARS = Fraction(1, 32)
-
-
-def _timing_manifest(mid_path, mid=None, speed: float = 1.0) -> dict:
-    """Return the source MIDI clock as absolute tick/time change points.
-
-    The piano roll is read-only, but its ruler still has to speak in bars and
-    note values rather than inventing evenly spaced seconds.  A compact tempo
-    map lets the browser place those musical divisions accurately even when a
-    file changes tempo, without asking it to parse MIDI itself.
-
-    MIDI defines 120 BPM and 4/4 when a file omits the corresponding metadata.
-    Markers at the same tick replace one another so a normal tick-zero tempo or
-    signature does not leave a redundant default entry in the payload.
-
-    `mid` accepts an already-parsed file, the same reuse `parse_notes` offers,
-    since this and the note parse used to each read the file from disk
-    independently on every interactive settings change.
-
-    `speed` is the song's `playback_speed` tuning lever, applied the same way
-    `parse_notes` applies it: it divides elapsed time uniformly, after tempo,
-    so the ruler and every note position keep agreeing with each other.
-    """
-    import mido
-
-    if mid is None:
-        mid = mido.MidiFile(str(mid_path), clip=True)
-    ticks_per_beat = int(mid.ticks_per_beat)
-    tick = 0
-    elapsed_s = 0.0
-    tempo = 500_000
-    tempos = [{"tick": 0, "time_ms": 0.0, "tempo": tempo}]
-    signatures = [{"tick": 0, "time_ms": 0.0, "numerator": 4, "denominator": 4}]
-
-    def record(markers, marker):
-        if markers[-1]["tick"] == marker["tick"]:
-            markers[-1] = marker
-        else:
-            markers.append(marker)
-
-    for message in mido.merge_tracks(mid.tracks):
-        delta = int(message.time)
-        elapsed_s += mido.tick2second(delta, ticks_per_beat, tempo) / speed
-        tick += delta
-        time_ms = round(elapsed_s * 1000, 6)
-        if message.type == "set_tempo":
-            tempo = int(message.tempo)
-            record(tempos, {"tick": tick, "time_ms": time_ms, "tempo": tempo})
-        elif message.type == "time_signature":
-            record(
-                signatures,
-                {
-                    "tick": tick,
-                    "time_ms": time_ms,
-                    "numerator": int(message.numerator),
-                    "denominator": int(message.denominator),
-                },
-            )
-
-    source_duration_ticks = tick
-    signature = signatures[-1]
-    ticks_per_bar = Fraction(
-        ticks_per_beat * 4 * int(signature["numerator"]),
-        int(signature["denominator"]),
-    )
-    ticks_since_signature = max(0, source_duration_ticks - int(signature["tick"]))
-    raw_bars = Fraction(ticks_since_signature, 1) / ticks_per_bar
-    completed_bars = math.ceil(raw_bars - _GRID_PADDING_BARS) if raw_bars else 0
-    # Absorbing the padding must never absorb the music with it: any content at
-    # all occupies at least the measure it started in.
-    if ticks_since_signature and completed_bars < 1:
-        completed_bars = 1
-    grid_duration_ticks = max(
-        source_duration_ticks,
-        int(math.ceil(Fraction(int(signature["tick"]), 1) + completed_bars * ticks_per_bar)),
-    )
-
-    def time_at_tick(target_tick):
-        marker = tempos[0]
-        for candidate in tempos[1:]:
-            if int(candidate["tick"]) > target_tick:
-                break
-            marker = candidate
-        return round(
-            float(marker["time_ms"])
-            + (target_tick - int(marker["tick"])) * int(marker["tempo"]) / 1000 / ticks_per_beat / speed,
-            6,
-        )
-
-    return {
-        "ticks_per_beat": ticks_per_beat,
-        # Keep the file boundary and the workstation boundary separate. Some
-        # DAWs write End-of-Track at the final note even when their clip still
-        # has an empty remainder. The source value remains available for exact
-        # MIDI accounting; the padded value gives the read-only piano roll a
-        # complete final measure without inventing another note or stop event.
-        "duration_ticks": source_duration_ticks,
-        "source_duration_ms": time_at_tick(source_duration_ticks),
-        "grid_duration_ticks": grid_duration_ticks,
-        "grid_duration_ms": time_at_tick(grid_duration_ticks),
-        "tempo_changes": tempos,
-        "time_signatures": signatures,
-        # The file's own initial tempo, unaffected by `speed` -- that lever is a
-        # playback multiplier layered on top, not a rewrite of what the file
-        # says. MIDI's own default (120 BPM, `tempo = 500_000`) stands in when
-        # the file never sets one, exactly as it does for playback itself.
-        "base_bpm": round(60_000_000.0 / tempos[0]["tempo"], 2),
-    }
 
 
 def _percussion_modes(doc) -> tuple:
@@ -248,10 +130,8 @@ class Session:
         self._lock = RLock()
         self._note_index = palette.build_note_index()
         self._analysis = None
-        self._mid = None
-        self._mid_key = None
-        self._timing = None
-        self._timing_key = None
+        self._song = None
+        self._history = History()
         if settings_path is None:
             self._doc = settings_module.defaults()
         else:
@@ -260,70 +140,58 @@ class Session:
             self._doc = settings_module.merge(self._doc, {"midi": str(midi)})
         if self._doc["midi"]:
             try:
-                self._analysis = self._analyze()
+                self._adopt(project.open_midi(self._doc["midi"], self._doc))
             except Exception:
                 if midi is not None:
                     raise
 
     # ---- the song ----
 
+    def _adopt(self, song) -> None:
+        """Take a song as the thing this session is editing from now on.
+
+        The undo history is cleared with it. A command holds callables that
+        close over the notes of the song it was recorded against, so replaying
+        one onto a different song would mutate objects nothing is looking at any
+        more -- and it is what any editor does when a different file is opened.
+        """
+        self._song = song
+        self._analysis = self._analyze()
+        self._history.clear()
+
     def _analyze(self):
-        """Read the current song under the current drums mode.
+        """Read the open song's parts, as the window's rows describe them.
 
-        Both come from the document, so the analysis the window draws and the
-        compile the window exports are always answering the same question about
-        the same file.
+        Derived from the song rather than from the file, so it says what is
+        being edited rather than what was once imported. Both the drums mode and
+        each track's percussion mode already live on the song, which is what
+        keeps a row that draws a kit and a compile that routes it through
+        `DRUM_MAP` from ever describing different arrangements.
         """
-        return analysis.analyze(
-            self._doc["midi"],
-            drums=self._doc["drums"],
-            part_percussion=settings_module.to_compile_kwargs(self._doc)["part_percussion"],
-        )
+        return None if self._song is None else analysis.from_song(self._song)
 
-    def _current_mid(self):
-        """The open song's own `mido.MidiFile`, parsed at most once per edit.
+    def song(self):
+        """The song this session is editing, or None when nothing is open.
 
-        A settings patch -- a mute click, a volume drag -- re-derives the whole
-        preview, and both `parse_notes` and the timing ruler used to read the
-        same bytes off disk again for every one of them: on a dense song, two
-        full re-parses per keystroke were most of what made the window feel a
-        beat behind. Nothing about the FILE changes between those patches, only
-        the document describing what to do with it, so the parse is cached
-        here and invalidated by the same fact that would invalidate it for a
-        human -- the file on disk is no longer the one last read.
+        Handed out live rather than copied: this is the mutable document, and
+        the structural edits that arrive from Phase 2 onward change it in place
+        under the lock this class holds.
         """
-        path = self._doc["midi"]
-        if not path:
-            return None
-        stat = Path(path).stat()
-        key = (path, stat.st_mtime_ns, stat.st_size)
-        if self._mid is None or self._mid_key != key:
-            import mido
-
-            self._mid = mido.MidiFile(str(path), clip=True)
-            self._mid_key = key
-        return self._mid
+        with self._lock:
+            return self._song
 
     def _current_timing(self) -> dict:
-        """The song's tempo/time-signature map, rebuilt when the file or speed is.
+        """The song's tempo/time-signature map, as the transport will run it.
 
-        No setting on the document changes a note's tick or a tempo event's
-        time -- only whether and how it plays -- so this is exactly as cache-
-        safe as the parse it is built from, EXCEPT `playback_speed`: that lever
-        stretches or compresses every elapsed second the same way it stretches
-        a note's start and end, so the ruler has to agree with it too. The
-        cache key carries the speed alongside the file identity for that one
-        exception; rebuilding on every mute click was the single largest cost
-        left in an interactive settings change once the parse itself was
-        cached, and speed changes far less often than mutes do.
+        The map itself was read once, at import, and nothing about editing a
+        note moves a bar line. `playback_speed` is the one lever that reaches it,
+        and it reaches it by division rather than by re-reading anything.
         """
-        mid = self._current_mid()
-        speed = self._doc["tuning"]["playback_speed"]
-        key = (self._mid_key, speed)
-        if self._timing is None or self._timing_key != key:
-            self._timing = _timing_manifest(self._doc["midi"], mid=mid, speed=speed)
-            self._timing_key = key
-        return self._timing
+        if self._song is None:
+            return {}
+        return timing_module.at_speed(
+            self._song.timing, self._doc["tuning"]["playback_speed"]
+        )
 
     def load(self, midi_path) -> dict:
         """Open a song, forgetting the last one's instruments and keeping the setup.
@@ -350,14 +218,10 @@ class Session:
             candidate["drum_keys"] = {}
             candidate = settings_module.validate(candidate)
 
-            fresh = analysis.analyze(
-                midi_path,
-                drums=candidate["drums"],
-                part_percussion=settings_module.to_compile_kwargs(candidate)["part_percussion"],
-            )
+            fresh = project.open_midi(midi_path, candidate)
             self._doc = candidate
-            self._analysis = fresh
-            return analysis.as_dict(fresh)
+            self._adopt(fresh)
+            return analysis.as_dict(self._analysis)
 
     def analysis_dict(self) -> dict | None:
         """The open song as JSON, or None when there is no song open.
@@ -420,43 +284,47 @@ class Session:
             return copy.deepcopy(self._doc)
 
     def apply(self, patch) -> dict:
-        """Merge a patch into the document, and re-read the file if it has to.
+        """Merge a patch into the document, and project it onto the song.
 
         Validation runs before anything is stored, so a refused patch leaves the
-        session exactly as it was. That matters more here than in a file: the
-        window shows one state and has no undo, so a half-applied patch is a
-        window describing settings nobody chose.
+        session exactly as it was. That matters more here than in a file: a
+        half-applied patch is a window describing settings nobody chose, and the
+        song underneath it playing a third thing.
 
-        The file is read again when the drums mode changes, because that switch
-        decides whether channel 9 is a kit. Without it the row goes on offering a
-        family dropdown for a channel the compiler has started routing through
-        `DRUM_MAP`, and the window describes an instrument nothing plays. The
-        song path is watched for the same reason, though the window changes that
-        through `load`.
+        The parts are described again when the drums mode changes, because that
+        switch decides whether channel 9 is a kit. Without it the row goes on
+        offering a family dropdown for a channel the compiler has started
+        routing through `DRUM_MAP`. The song path is watched for the same
+        reason, though the window changes that through `load`.
         """
         with self._lock:
             merged = settings_module.merge(self._doc, patch)
-            reread = (
-                merged["drums"],
-                merged["midi"],
-                _percussion_modes(merged),
-            ) != (
+            reopened = merged["midi"] != self._doc["midi"]
+            reread = (merged["drums"], _percussion_modes(merged)) != (
                 self._doc["drums"],
-                self._doc["midi"],
                 _percussion_modes(self._doc),
             )
             previous = self._doc
             self._doc = merged
-            if reread and self._analysis is not None:
+            if reopened:
+                # `load` is the door for this, and the window only ever uses
+                # that one. A patch can still name a different song -- the
+                # command line's `--settings` remembers one -- and a session
+                # holding the old song's notes under the new song's name would
+                # export music from a file nobody has open.
                 try:
-                    self._analysis = self._analyze()
+                    self._adopt(project.open_midi(merged["midi"], merged))
                 except Exception:
                     self._doc = previous
                     raise
+            elif self._song is not None:
+                project.apply_settings(self._song, merged)
+                if reread:
+                    self._analysis = self._analyze()
             return copy.deepcopy(merged)
 
     def reanalyze(self) -> None:
-        """Read the song again with nothing in the document changed.
+        """Describe the song's parts again with nothing in the document changed.
 
         The percussion table is a preference, not a setting of this song, so
         it lives outside the document and saving one moves what `drum_keys`
@@ -465,8 +333,92 @@ class Session:
         old kick until the song is reopened.
         """
         with self._lock:
-            if self._analysis is not None:
+            if self._song is not None:
                 self._analysis = self._analyze()
+
+    # ---- undo ----
+
+    def push_command(self, label: str, revert, apply=None) -> None:
+        """Record a change already made to the song, and how to take it back.
+
+        Nothing in this phase calls it: no structural edit exists yet. It is
+        here now so the ones that arrive next -- move, resize, delete, draw, add
+        a track -- push onto a stack that already works rather than one designed
+        around whichever of them happens to be written first.
+        """
+        with self._lock:
+            self._history.push(
+                Command(label=label, apply=apply or (lambda: None), revert=revert)
+            )
+
+    def undo(self) -> dict:
+        """Take back the last change, and say what is left to take back."""
+        with self._lock:
+            label = self._history.undo()
+            if label is not None:
+                self._analysis = self._analyze()
+            state = self._history.state()
+            state["undone"] = label
+            return state
+
+    def redo(self) -> dict:
+        """Put back the last undone change."""
+        with self._lock:
+            label = self._history.redo()
+            if label is not None:
+                self._analysis = self._analyze()
+            state = self._history.state()
+            state["redone"] = label
+            return state
+
+    def history_state(self) -> dict:
+        with self._lock:
+            return self._history.state()
+
+    # ---- the project file ----
+
+    def project_destination(self):
+        """Where this song's project file would be written, or None.
+
+        Beside the `.mid`, named after it -- the same convention the settings
+        sidecar uses, and for the same reason: a dialog would mean a file the
+        user has to keep track of, while the song is the thing they already have
+        open.
+        """
+        with self._lock:
+            song = self._song
+            if song is None or not song.origin:
+                return None
+            return project.project_path(song.origin)
+
+    def save_project(self, path=None):
+        """Write the song to a project file, and say where it went.
+
+        The `.mid` is never touched. An import is a starting point, and a
+        starting point that gets overwritten is not one.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            if path is None:
+                path = self.project_destination()
+            if path is None:
+                raise ValueError("this song has no file to sit beside -- choose where to save it")
+            return project.save(self._song, path)
+
+    def load_project(self, path) -> dict:
+        """Open a saved project, replacing whatever this session was editing.
+
+        The settings document is rebuilt from the song, because that document is
+        what every control in the window patches. Only the keys about the user's
+        setup -- where maps are written, which baseline to add to -- survive from
+        the session that was open, since those are not part of the project.
+        """
+        with self._lock:
+            song = project.load(path)
+            self._doc = project.to_settings(song, self._doc)
+            self._adopt(song)
+            return analysis.as_dict(self._analysis)
 
     # ---- compiling ----
 
@@ -480,8 +432,19 @@ class Session:
         path = Path(chosen) if chosen else paths.baseline_map()
         return path.read_bytes() if path else None
 
+    def _levers(self) -> dict:
+        """Every conversion choice, read off the song rather than the document.
+
+        The document is where the choices are MADE; the song is where they are
+        kept once a wildcard has been resolved onto the tracks it covered. Both
+        say the same thing, and reading the song is what makes an edit that
+        never touched the document -- a note moved, a track added -- reach the
+        compile at all.
+        """
+        return compile_levers(self._song)
+
     def compile(self):
-        """Compile the document as it stands: finished bytes and a statistics summary.
+        """Compile the song as it stands: finished bytes and a statistics summary.
 
         Held under the lock for its whole duration rather than compiled from a
         snapshot. A compile that read the family list before a change and the
@@ -491,18 +454,17 @@ class Session:
         makes and drops answers that arrive out of order.
         """
         with self._lock:
-            if not self._doc["midi"]:
+            if self._song is None:
                 raise ValueError("no song is open -- open a MIDI file first")
-            return compile_to_rawmap(
-                self._doc["midi"],
+            return compile_song(
+                self._song,
                 self._baseline_bytes(),
+                levers=self._levers(),
                 note_index=self._note_index,
-                mid=self._current_mid(),
-                **settings_module.to_compile_kwargs(self._doc),
             )
 
     def stats(self) -> dict:
-        """A dry run: what a compile of this document produces, plus the warnings.
+        """A dry run: what a compile of this song produces, plus the warnings.
 
         Really compiles. An estimate that disagreed with the export would be
         discovered in game, and closing that loop is the entire reason this
@@ -515,144 +477,35 @@ class Session:
     def preview_manifest(self, *, with_stats: bool = False):
         """The converted notes the workstation transport will actually play.
 
-        This repeats the note preparation portion of ``compile_to_rawmap`` but
-        does not author a map. It applies the same channel choices, duration
-        caps, polyphony thinning and per-layer voice stealing so the preview is
-        a reading of the current conversion rather than a General MIDI render.
+        The same conversion the export runs, stopping before the map is
+        authored. Channel choices, duration caps, polyphony thinning and
+        per-layer voice stealing all come from `music/pipeline.py`, which the
+        compiler uses too -- so the preview is a reading of the current
+        conversion rather than a General MIDI render, and it cannot drift from
+        what gets exported.
 
         ``with_stats`` is the fast status path used by an interactive settings
         update. Authoring and serialising a complete map just to repaint a mute
-        button makes a dense MIDI file feel frozen; the exact, export-ready
-        report remains available through :meth:`stats` and ``dry_run``.
+        button makes a dense song feel frozen; the exact, export-ready report
+        remains available through :meth:`stats` and ``dry_run``.
         """
         with self._lock:
-            if not self._doc["midi"]:
+            if self._song is None:
                 raise ValueError("no song is open -- open a MIDI file first")
-            levers = settings_module.to_compile_kwargs(self._doc)
-            mid = self._current_mid()
-            notes, source_stats = parse_notes(
-                self._doc["midi"],
-                drums=levers["drums"],
-                decaying_families=levers["decaying_families"],
-                channel_families=levers["channel_families"],
-                channel_sounds=levers["channel_sounds"],
+            levers = self._levers()
+            notes, source_stats = pipeline.resolve(
+                self._song,
+                levers,
                 note_index=self._note_index,
-                channel_mutes=levers["channel_mutes"],
-                channel_solos=levers["channel_solos"],
-                drum_key_overrides=levers["drum_key_overrides"],
-                event_is_looping=installed_event_is_looping,
-                channel_pitch_profiles=levers["channel_pitch_profiles"],
-                part_percussion=levers["part_percussion"],
-                note_overrides=levers["note_overrides"],
-                part_volume_db=levers["part_volume_db"],
-                master_volume_db=levers["master_volume_db"],
-                part_key_range=levers["part_key_range"],
-                part_transpose=levers["part_transpose"],
-                part_pitch_octave=levers["part_pitch_octave"],
-                playback_speed=levers["playback_speed"],
                 include_silent=True,
-                mid=mid,
+                event_is_looping=installed_event_is_looping,
             )
             audible_notes = [note for note in notes if note.audible]
-            parts = {}
-            for note in audible_notes:
-                parts.setdefault((getattr(note, "track", 0), note.chan), []).append(note)
-            limited_notes = []
-            for part_key in sorted(parts):
-                part = parts[part_key]
-                poly = for_part(levers["part_polyphony"], *part_key, levers["max_poly"])
-                kept = thin_polyphony(part, poly) if poly else part
-                surviving = {id(note) for note in kept}
-                for note in part:
-                    if id(note) not in surviving:
-                        note.limited_by = "polyphony"
-                limited_notes.extend(kept)
-            globally_kept = thin_global_polyphony(limited_notes, levers["song_polyphony"])
-            globally_surviving = {id(note) for note in globally_kept}
-            for note in limited_notes:
-                if id(note) not in globally_surviving:
-                    note.limited_by = "global_polyphony"
-            limited_notes = globally_kept
-            decaying = [note for note in limited_notes if not note.sustained]
-            sustained = [note for note in limited_notes if note.sustained]
-            shared_decaying, expressive_decaying, layers = prepare_voice_layers(
-                decaying,
-                sustained,
-                cap_sustain_ms=levers["cap_sustain_ms"],
-                bass_pitch=levers["bass_pitch"],
-                bass_cap_ms=levers["bass_cap_ms"],
-                family_caps=levers["family_caps"],
-                duration_lookup=installed_event_duration_ms,
-                part_glide_ms=levers["part_glide_ms"],
-                part_attack_ms=levers["part_attack_ms"],
-                part_voices=levers["part_voices"],
-                part_sustain_ms=levers["part_sustain_ms"],
-                note_off=levers["note_off"],
-                part_note_off=levers["part_note_off"],
-                note_off_floor_ms=levers["note_off_floor_ms"],
-                part_note_off_floor_ms=levers["part_note_off_floor_ms"],
+            prepared = pipeline.prepare(
+                audible_notes, levers, duration_lookup=installed_event_duration_ms
             )
-            prepared = list(shared_decaying)
-            isolated = []
-            for part_key in sorted(layers):
-                layer = layers[part_key]
-                voices = for_part(levers["part_voices"], *part_key, levers["max_speakers"])
-                kept = apply_voice_cap(layer, voices)
-                surviving = {id(note) for note in kept}
-                for note in layer:
-                    if id(note) not in surviving:
-                        note.limited_by = "voices"
-                for note in kept:
-                    cap_end = getattr(note, "voice_cap_end", None)
-                    if cap_end is not None:
-                        note.preview_cut = True
-                        note.preview_end = cap_end
-                        if cap_end < note.end:
-                            note.shortened_by = "voices"
-                layer = kept
-                isolated.extend(layer)
-
-            # One pool for the whole song: the global voice count decides how
-            # many dedicated pitch-controlled emitters the map and preview may
-            # use in total.
-            kept = thin_simultaneous(isolated, levers["max_speakers"])
-            surviving = {id(note) for note in kept}
-            for note in isolated:
-                if id(note) not in surviving:
-                    note.limited_by = "voices"
-            voice_count = allocate_voices(kept, levers["max_speakers"])
-            apply_glides(kept, levers["part_glide_ms"])
-
-            # Starting a note on a stolen emitter cuts off the note that owned
-            # it. Reflect that effective end for both sustains and expressive
-            # one-shots so browser preview matches the map.
-            by_voice: dict = {}
-            for note in kept:
-                by_voice.setdefault(note.voice, []).append(note)
-            for voice_notes in by_voice.values():
-                voice_notes.sort(key=lambda note: note.start)
-                for index, note in enumerate(voice_notes[:-1]):
-                    following = voice_notes[index + 1]
-                    effective_end = (
-                        note.end
-                        if note.sustained
-                        else getattr(note, "voice_end", note.end)
-                    )
-                    effective_end = min(
-                        effective_end,
-                        getattr(note, "voice_cap_end", effective_end),
-                    )
-                    if following.start <= effective_end:
-                        note.preview_cut = True
-                    if following.start < effective_end:
-                        note.shortened_by = "voices"
-                        note.preview_end = min(
-                            getattr(note, "preview_end", effective_end),
-                            following.start,
-                        )
-            prepared.extend(kept)
-
-            prepared_ids = {id(note) for note in prepared}
+            scheduled_notes = list(prepared.shared_decaying) + list(prepared.isolated)
+            scheduled_ids = {id(note) for note in scheduled_notes}
 
             def _event_payload(note, *, converted):
                 midi_end = max(note.start, getattr(note, "midi_end", note.end))
@@ -784,10 +637,11 @@ class Session:
                 return (note.start, note.chan, note.source_pitch, note.id)
 
             events = [
-                _event_payload(note, converted=True) for note in sorted(prepared, key=_event_order)
+                _event_payload(note, converted=True)
+                for note in sorted(scheduled_notes, key=_event_order)
             ]
             display_events = [
-                _event_payload(note, converted=id(note) in prepared_ids)
+                _event_payload(note, converted=id(note) in scheduled_ids)
                 for note in sorted(notes, key=_event_order)
             ]
             timing = self._current_timing()
@@ -820,15 +674,18 @@ class Session:
             preview_stats.update(
                 {
                     "notes": len(audible_notes),
-                    "decaying": len(decaying),
-                    "sustained": len(sustained),
-                    "voices": voice_count,
-                    "shared_one_shots": len(shared_decaying),
-                    "expressive_notes": len(sustained) + len(expressive_decaying),
-                    "expressive_one_shots": len(expressive_decaying),
-                    "expressive_voices": voice_count,
-                    "long_sustains": sum(note.duration > 1000 for note in sustained),
-                    "peak_voices": voice_count,
+                    "decaying": len(prepared.decaying),
+                    "sustained": len(prepared.sustained),
+                    "voices": prepared.voice_count,
+                    "shared_one_shots": len(prepared.shared_decaying),
+                    "expressive_notes": len(prepared.sustained)
+                    + len(prepared.expressive_decaying),
+                    "expressive_one_shots": len(prepared.expressive_decaying),
+                    "expressive_voices": prepared.voice_count,
+                    "long_sustains": sum(
+                        note.duration > 1000 for note in prepared.sustained
+                    ),
+                    "peak_voices": prepared.voice_count,
                     "max_speakers": levers["max_speakers"],
                 }
             )

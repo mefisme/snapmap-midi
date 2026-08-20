@@ -33,6 +33,7 @@
   <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></symbol>
   <symbol id="icon-wave-sine" viewBox="0 0 24 24"><path d="M2 12c1.5-6 3.5-6 5-3s3.5 9 5 6 3.5-9 5-6 3.5 3 5 3"></path></symbol>
   <symbol id="icon-stack" viewBox="0 0 24 24"><path d="m12 2 8 5-8 5-8-5z"></path><path d="m4 12 8 5 8-5"></path><path d="m4 17 8 5 8-5"></path></symbol>
+  <symbol id="icon-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"></path><path d="M3 11v-1a4 4 0 0 1 4-4h14"></path><path d="m7 22-4-4 4-4"></path><path d="M21 13v1a4 4 0 0 1-4 4H3"></path></symbol>
 </svg>
 <!-- Track rows and category controls are built from the Python payload. The
      fixed markup is the one-screen workstation shell: desktop menus, global
@@ -58,7 +59,10 @@
           <button type="button" id="menuOpenProject" role="menuitem"><span>Open Project...</span><kbd>Ctrl+O</kbd></button>
           <button type="button" id="menuSaveProject" role="menuitem" disabled><span>Save Project...</span><kbd>Ctrl+S</kbd></button>
           <div class="menu-separator"></div>
+          <button type="button" id="menuSongLength" role="menuitem" disabled><span>Set Song Length...</span></button>
+          <div class="menu-separator"></div>
           <button type="button" id="menuExport" role="menuitem" disabled><span>Export SnapMap...</span><kbd>Ctrl+E</kbd></button>
+          <button type="button" id="menuExportLoop" role="menuitem" disabled><span>Export Loop as Song...</span></button>
           <div class="menu-separator"></div>
           <button type="button" id="menuExit" role="menuitem"><span>Exit</span><kbd>Alt+F4</kbd></button>
         </div>
@@ -107,6 +111,7 @@
       <input type="text" inputmode="decimal" class="tempo-input mono" id="tempoInput" value="120.00" aria-label="Song tempo in beats per minute" readonly disabled>
       <span class="tempo-unit">BPM</span>
     </div>
+    <button type="button" class="tool-button icon-tool-button" id="loopPlaybackBtn" title="Loop playback between the loop brace" aria-label="Loop playback" aria-pressed="false" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-repeat"></use></svg></button>
     <button type="button" class="tool-button icon-tool-button" id="conversionBtn" title="Default settings" aria-label="Default settings" aria-controls="conversionInspector" aria-expanded="false"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg></button>
     <button type="button" class="tool-button primary" id="exportBtn" disabled>Export</button>
   </div>
@@ -139,6 +144,12 @@
     <section class="roll-pane" id="rollPane" aria-label="Converted song piano roll">
       <div class="roll-corner" aria-hidden="true"></div>
       <canvas class="time-ruler" id="timeRuler" aria-hidden="true"></canvas>
+      <!-- A dedicated strip below the ruler, not sharing its pixels: the ruler
+           is the scrub control (click-drag anywhere on it seeks), and the loop
+           brace needs its own always-draggable edges and body with nothing
+           fighting it for the same gesture. -->
+      <canvas class="loop-brace" id="loopBrace" tabindex="0"
+        aria-label="Loop region. Drag an edge to resize it, drag the middle to move it."></canvas>
       <canvas class="pitch-ruler" id="pitchRuler" aria-hidden="true"></canvas>
       <div class="roll-track-chip" id="rollTrackChip" hidden>
         <span class="roll-track-chip-dot" id="rollTrackChipDot" aria-hidden="true"></span>
@@ -588,6 +599,25 @@
       </label>
       <button type="button" class="btn" id="soundBrowserCancel">Cancel</button>
       <button type="button" class="btn primary" id="soundBrowserUse" disabled>Use sound</button>
+    </footer>
+  </section>
+</div>
+
+<div class="modal-overlay" id="songLengthOverlay" hidden>
+  <section class="modal song-length-modal" role="dialog" aria-modal="true" aria-labelledby="songLengthTitle">
+    <header class="sound-browser-head">
+      <strong id="songLengthTitle">Set song length</strong>
+      <button type="button" class="close-button" id="songLengthClose" aria-label="Close"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-x"></use></svg></button>
+    </header>
+    <div class="song-length-body">
+      <label for="songLengthInput">Length, in milliseconds
+        <input type="number" id="songLengthInput" min="1" step="1" inputmode="numeric">
+      </label>
+      <div class="muted">Notes past the new length are not deleted -- they stop playing and exporting, and show dimmed, until the length grows past them again.</div>
+    </div>
+    <footer class="sound-browser-foot">
+      <button type="button" class="btn" id="songLengthCancel">Cancel</button>
+      <button type="button" class="btn primary" id="songLengthSet">Set length</button>
     </footer>
   </section>
 </div>

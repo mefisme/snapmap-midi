@@ -127,6 +127,7 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .tool-button:disabled { opacity: .45; }
 .tool-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accentText); }
 .tool-button.primary:hover:not(:disabled) { filter: brightness(1.16); }
+.icon-tool-button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
 
 /* Empty and populated workspaces occupy the same region. */
 .empty-state { flex: 1; display: grid; place-items: center; min-height: 0; padding: 24px; }
@@ -178,9 +179,12 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
 /* The 72px pitch-ruler gutter only exists once a track's roll is open --
    lanes mode collapses it to 0 so the lanes and their notes run flush with
    the ruler above them instead of leaving that gutter's width sitting empty. */
-.roll-pane { position: relative; flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: 0 minmax(0,1fr); grid-template-rows: 31px minmax(0,1fr); overflow: hidden; background: var(--panel2); }
+/* Three header rows, not two: the ruler (scrub control) and the loop brace
+   (its own always-draggable strip, see .loop-brace below) must never share a
+   row's pixels, or a click meant for one gesture would land on the other. */
+.roll-pane { position: relative; flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: 0 minmax(0,1fr); grid-template-rows: 31px 12px minmax(0,1fr); overflow: hidden; background: var(--panel2); }
 .roll-pane.roll-pane--open { grid-template-columns: 72px minmax(0,1fr); }
-.roll-pane::after { content: ""; position: absolute; z-index: 3; top: 0; left: 0; right: 0; height: 31px; border-bottom: 1px solid var(--border2); pointer-events: none; }
+.roll-pane::after { content: ""; position: absolute; z-index: 3; top: 0; left: 0; right: 0; height: 43px; border-bottom: 1px solid var(--border2); pointer-events: none; }
 .roll-pane.roll-pane--open::after { left: 72px; }
 .roll-corner { grid-column: 1; grid-row: 1; border-right: 1px solid var(--border2); border-bottom: 1px solid var(--border2); background: var(--panel2); }
 /* :not([hidden]) rather than a bare .class{display:...} rule -- an author
@@ -196,7 +200,7 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
    gutter, 31px ruler header) and simply covers it -- the roll keeps its real
    layout size underneath so the ruler's own width/scroll math never sees a
    zero-width viewport, it is just visually and pointer-wise on top. */
-.lanes-view:not([hidden]) { position: absolute; z-index: 4; top: 31px; left: 0; right: 0; bottom: 0; overflow: auto; scrollbar-gutter: stable; scrollbar-color: var(--border2) var(--panel2); background: var(--field); cursor: crosshair; touch-action: none; }
+.lanes-view:not([hidden]) { position: absolute; z-index: 4; top: 43px; left: 0; right: 0; bottom: 0; overflow: auto; scrollbar-gutter: stable; scrollbar-color: var(--border2) var(--panel2); background: var(--field); cursor: crosshair; touch-action: none; }
 /* Zero gap, no padding: each lane's height is set from its own track row's
    measured height, and each lane's WIDTH is set to ROLL.contentWidth (see
    patchLanesView) so it scrolls and zooms in lockstep with the ruler instead
@@ -209,8 +213,14 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
 .lane-grid-fill { position: relative; flex: none; overflow: hidden; background: var(--field); pointer-events: none; }
 .lane-grid-fill-canvas { position: absolute; top: 0; left: 0; display: block; }
 .time-ruler { grid-column: 2; grid-row: 1; display: block; align-self: start; }
-.pitch-ruler { grid-column: 1; grid-row: 2; display: block; justify-self: start; }
-.roll-viewport { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border2) var(--panel2); background: var(--field); }
+/* Always visible, whether or not "Loop playback" is on -- the toggle only
+   changes the fill color below, never whether the brace is there to grab. */
+.loop-brace { grid-column: 2; grid-row: 2; display: block; width: 100%; height: 12px; border-top: 1px solid var(--border); background: var(--panel2); cursor: default; touch-action: none; }
+.loop-brace.loop-hover-move, .loop-brace.loop-dragging-move { cursor: grab; }
+.loop-brace.loop-dragging-move { cursor: grabbing; }
+.loop-brace.loop-hover-resize, .loop-brace.loop-dragging-resize { cursor: ew-resize; }
+.pitch-ruler { grid-column: 1; grid-row: 3; display: block; justify-self: start; }
+.roll-viewport { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border2) var(--panel2); background: var(--field); }
 .roll-extent { position: relative; min-width: 100%; min-height: 100%; }
 #pianoRoll { position: sticky; left: 0; top: 0; display: block; cursor: crosshair; touch-action: none; }
 #pianoRoll.note-hover { cursor: pointer; }
@@ -222,7 +232,7 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
    lanes were showing. */
 .roll-overlay { position: absolute; z-index: 4; left: 0; display: block; pointer-events: none; }
 .roll-pane.roll-pane--open .roll-overlay { left: 72px; }
-.piano-roll-overlay { top: 31px; }
+.piano-roll-overlay { top: 43px; }
 .time-ruler-overlay { top: 0; }
 .horizontal-scroll-lock { position: absolute; z-index: 6; left: 0; bottom: 0; min-height: 1px; background: var(--scrollDisabled); border-top: 1px solid color-mix(in srgb, var(--border2) 72%, var(--scrollDisabled)); cursor: default; pointer-events: auto; }
 .roll-pane.roll-pane--open .horizontal-scroll-lock { left: 72px; }
@@ -267,6 +277,11 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }
 .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
 .sound-browser-modal { width: min(980px, calc(100vw - 48px)); height: min(680px, calc(100vh - 56px)); min-width: 620px; min-height: 420px; padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--text); user-select: none; -webkit-user-select: none; }
+.song-length-modal { width: min(360px, calc(100vw - 48px)); padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--text); }
+.song-length-modal .sound-browser-foot { justify-content: flex-end; }
+.song-length-body { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+.song-length-body label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.song-length-body input { width: 100%; box-sizing: border-box; }
 .sound-browser-head { min-height: 58px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel2); }
 .sound-browser-head strong { font-size: 13px; }
 .sound-browser-search { min-height: 46px; flex: none; display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }

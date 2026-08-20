@@ -113,6 +113,21 @@
   // the plan calls for -- wide enough to hit without narrowing the body zone
   // enough to make an ordinary short note hard to move.
   var NOTE_RESIZE_HANDLE_PX = 6;
+  // The loop brace's own dedicated strip below the ruler (see .loop-brace in
+  // styles.css) -- kept in sync with the CSS rule's own height by hand, the
+  // same way NOTE_RESIZE_HANDLE_PX above already is with the roll's handles.
+  var LOOP_BRACE_HEIGHT = 12;
+  var LOOP_BRACE_HANDLE_PX = 6;
+  // An edge-drag ('resize-start'/'resize-end') or a body-drag ('move') on the
+  // loop brace in progress, or null. Mirrors NOTE_DRAG's shape: a local
+  // optimistic `liveStart`/`liveEnd` pair for instant redraw, one bridge call
+  // on pointerup.
+  var LOOP_DRAG = null;
+  // A drag on the song's own right-edge handle in progress, or null. Same
+  // shape and same resize-handle cursor treatment as a note's own right edge
+  // (NOTE_RESIZE_HANDLE_PX/.note-resize), just anchored to the song's end
+  // instead of one note's.
+  var SONG_LENGTH_DRAG = null;
   var PANE_SPLIT_DRAG = null;
   var TRACKS_PREFERRED_WIDTH = TRACKS_DEFAULT_WIDTH;
   var CANVAS_RESIZE_QUEUED = false;
@@ -491,7 +506,10 @@
   function updateMenuState() {
     var song = hasSong();
     var audio = STATE.audio || {};
-    ['menuReopen', 'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart'].forEach(function (id) { el(id).disabled = !song; });
+    [
+      'menuReopen', 'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart',
+      'menuSongLength', 'menuExportLoop'
+    ].forEach(function (id) { el(id).disabled = !song; });
     el('menuPlay').querySelector('span').textContent = AUDIO.playing ? 'Pause' : 'Play';
     if (audio.source === 'game' || audio.source === 'game+cache') {
       el('menuAudio').querySelector('span').textContent = 'DOOM Audio Ready';
@@ -2471,6 +2489,7 @@
     geometryChanged = sizeCanvas(el('pianoRollOverlay'), width, height) || geometryChanged;
     geometryChanged = sizeCanvas(el('timeRuler'), width, 31) || geometryChanged;
     geometryChanged = sizeCanvas(el('timeRulerOverlay'), width, 31) || geometryChanged;
+    geometryChanged = sizeCanvas(el('loopBrace'), width, LOOP_BRACE_HEIGHT) || geometryChanged;
     geometryChanged = sizeCanvas(el('pitchRuler'), 72, height) || geometryChanged;
     if (geometryChanged) { invalidateRollAll(); }
 
@@ -2708,6 +2727,31 @@
     var tick = tickAtTime(Math.max(0, Number(rawMs) || 0));
     var snappedTick = Math.round(tick / gridTicks) * gridTicks;
     return Math.max(0, timeAtTick(snappedTick));
+  }
+
+  // ---- the loop brace (Phase 3) ----
+  //
+  // The brace always exists -- see Song.loop_start_ms's own docstring -- so
+  // these never return null the way a "no loop yet" design would need to.
+  // `loop_enabled` is the transport's separate switch; the region below is
+  // there and draggable whether or not it is currently doing anything.
+
+  function loopStartMs() { return Math.max(0, Number(STATE.preview && STATE.preview.loop_start_ms) || 0); }
+  function loopEndMs() {
+    var duration = Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1);
+    var end = Number(STATE.preview && STATE.preview.loop_end_ms);
+    return isFinite(end) && end > 0 ? end : duration;
+  }
+  function loopEnabledState() { return !!(STATE.preview && STATE.preview.loop_enabled); }
+
+  // The region a drag in progress is showing, or the committed one from the
+  // last server answer -- the same local-optimistic-during-drag pattern
+  // `applyNoteDragTiming` uses for a note.
+  function effectiveLoopBounds() {
+    if (LOOP_DRAG && LOOP_DRAG.liveStart !== undefined) {
+      return { start: LOOP_DRAG.liveStart, end: LOOP_DRAG.liveEnd };
+    }
+    return { start: loopStartMs(), end: loopEndMs() };
   }
 
   function timingLines() {
@@ -3310,6 +3354,25 @@
     var height = ROLL.viewportHeight;
     clearCanvas(context, canvas);
 
+    // A faint reminder of where the loop sits behind whatever else is drawn
+    // on top of it, secondary to the brace itself -- see drawLoopBrace, the
+    // strip a person actually grabs to move or resize it.
+    if (hasSong()) {
+      var loopBounds = effectiveLoopBounds();
+      var loopScrollLeft = el('pianoRollViewport').scrollLeft;
+      var loopStartX = contentXAtTime(loopBounds.start) - loopScrollLeft;
+      var loopEndX = contentXAtTime(loopBounds.end) - loopScrollLeft;
+      var tintLeft = Math.max(0, loopStartX);
+      var tintRight = Math.min(width, loopEndX);
+      if (tintRight > tintLeft) {
+        context.save();
+        context.globalAlpha = loopEnabledState() ? 0.07 : 0.035;
+        context.fillStyle = palette.accent;
+        context.fillRect(tintLeft, 0, tintRight - tintLeft, height);
+        context.restore();
+      }
+    }
+
     if (SELECTED_NOTE_ID) {
       var selectedRecords = eventRenderIndex().records;
       for (var selectedIndex = 0; selectedIndex < selectedRecords.length; selectedIndex += 1) {
@@ -3358,6 +3421,27 @@
       context.globalAlpha = 1;
     }
 
+    // Where the song currently ends -- also its own drag handle (see
+    // atSongLengthHandle/beginSongLengthDrag), drawn live while dragging so
+    // the line tracks the pointer before the bridge call commits it.
+    if (hasSong()) {
+      var lengthMs = (SONG_LENGTH_DRAG && SONG_LENGTH_DRAG.live !== undefined)
+        ? SONG_LENGTH_DRAG.live
+        : Number(STATE.preview && STATE.preview.duration_ms) || 0;
+      var lengthX = contentXAtTime(lengthMs) - el('pianoRollViewport').scrollLeft;
+      if (lengthX >= -1 && lengthX <= width + 1) {
+        context.save();
+        context.strokeStyle = palette.rollBeat;
+        context.lineWidth = SONG_LENGTH_DRAG ? 2 : 1;
+        context.setLineDash(SONG_LENGTH_DRAG ? [] : [3, 2]);
+        context.beginPath();
+        context.moveTo(Math.round(lengthX) + 0.5, 0);
+        context.lineTo(Math.round(lengthX) + 0.5, height);
+        context.stroke();
+        context.restore();
+      }
+    }
+
     var playheadX = contentXAtTime(position) - el('pianoRollViewport').scrollLeft;
     if (playheadX >= -1 && playheadX <= width + 1) {
       context.strokeStyle = palette.accent;
@@ -3388,6 +3472,41 @@
     }
   }
 
+  // The brace's own strip (see .loop-brace / #loopBrace) -- a compact band
+  // with two edge handles, redrawn every frame the same as the playhead
+  // since a drag moves it live. Grayed out while "Loop playback" is off,
+  // full accent color while it is on; either way it is the same size and
+  // just as draggable, because dragging it never depended on the toggle.
+  function drawLoopBrace(palette) {
+    var canvas = el('loopBrace');
+    if (!canvas || canvas.width <= 1) { return; }
+    var context = prepareContext(canvas);
+    var width = ROLL.viewportWidth;
+    var height = LOOP_BRACE_HEIGHT;
+    clearCanvas(context, canvas);
+    if (!hasSong()) { return; }
+    var scrollLeft = el('pianoRollViewport').scrollLeft;
+    var bounds = effectiveLoopBounds();
+    var startX = contentXAtTime(bounds.start) - scrollLeft;
+    var endX = contentXAtTime(bounds.end) - scrollLeft;
+    if (endX < -LOOP_BRACE_HANDLE_PX || startX > width + LOOP_BRACE_HANDLE_PX) { return; }
+    var active = loopEnabledState();
+    var color = active ? palette.accent : palette.muted;
+    var left = Math.max(0, startX);
+    var right = Math.min(width, endX);
+    context.save();
+    context.globalAlpha = active ? 0.85 : 0.5;
+    context.fillStyle = color;
+    if (right > left) { context.fillRect(left, 3, right - left, height - 6); }
+    context.globalAlpha = 1;
+    [startX, endX].forEach(function (x) {
+      if (x < -LOOP_BRACE_HANDLE_PX || x > width + LOOP_BRACE_HANDLE_PX) { return; }
+      context.fillStyle = color;
+      context.fillRect(Math.round(x) - 1, 0, 2, height);
+    });
+    context.restore();
+  }
+
   function drawPianoRoll(positionOverride) {
     if (DRAW_FRAME !== null) {
       cancelAnimationFrame(DRAW_FRAME);
@@ -3410,6 +3529,7 @@
     }
     var position = positionOverride === undefined ? currentPosition() : positionOverride;
     drawRollOverlays(position, palette);
+    drawLoopBrace(palette);
   }
 
   function queueDraw() {
@@ -3453,9 +3573,13 @@
     canvas.classList.toggle("note-hover", !!hit);
     // Advertise the resize handle before a drag ever starts -- the same zone
     // beginNoteDrag will grab on pointerdown, so the cursor never promises a
-    // gesture the click will not deliver.
+    // gesture the click will not deliver. The song's own end handle shares
+    // this cursor class too, checked only when no note claimed the pointer
+    // first -- a note sitting right at the song's end still wins.
     var zone = hit ? noteEdgeZone(hit) : null;
-    canvas.classList.toggle("note-resize", zone === "resize" || zone === "resize-start");
+    var resizeCursor = zone === "resize" || zone === "resize-start" ||
+      (!hit && atSongLengthHandle(event));
+    canvas.classList.toggle("note-resize", resizeCursor);
     queueDraw();
   }
 
@@ -3686,6 +3810,187 @@
     commitNoteDrag(drag);
   }
 
+  // ---- the loop brace, its own strip below the ruler (Phase 3) ----
+  //
+  // A pointer near either edge adjusts that edge; a pointer between them
+  // moves the whole region; outside the brace does nothing here -- the same
+  // edge-vs-body split `noteEdgeZone` already makes for a note, applied to
+  // the brace instead. This strip is a separate element from #timeRuler on
+  // purpose: the ruler is the scrub control (drag anywhere on it seeks), and
+  // sharing pixels between "seek" and "move the loop" would make both
+  // gestures fight over the same click.
+
+  function loopBracePointerX(event) {
+    var rect = el('loopBrace').getBoundingClientRect();
+    return event.clientX - rect.left;
+  }
+
+  function loopBraceZone(event) {
+    if (!hasSong()) { return null; }
+    var pointerX = loopBracePointerX(event);
+    var scrollLeft = el('pianoRollViewport').scrollLeft;
+    var bounds = effectiveLoopBounds();
+    var startX = contentXAtTime(bounds.start) - scrollLeft;
+    var endX = contentXAtTime(bounds.end) - scrollLeft;
+    if (Math.abs(pointerX - endX) <= LOOP_BRACE_HANDLE_PX) { return 'resize-end'; }
+    if (Math.abs(pointerX - startX) <= LOOP_BRACE_HANDLE_PX) { return 'resize-start'; }
+    if (pointerX > startX && pointerX < endX) { return 'move'; }
+    return null;
+  }
+
+  function updateLoopBraceHover(event) {
+    if (LOOP_DRAG) { return; }
+    var canvas = el('loopBrace');
+    var zone = loopBraceZone(event);
+    canvas.classList.toggle('loop-hover-move', zone === 'move');
+    canvas.classList.toggle('loop-hover-resize', zone === 'resize-start' || zone === 'resize-end');
+  }
+
+  function clearLoopBraceHover() {
+    el('loopBrace').classList.remove('loop-hover-move', 'loop-hover-resize');
+  }
+
+  function beginLoopDrag(event) {
+    var zone = loopBraceZone(event);
+    if (!zone) { return; }
+    event.preventDefault();
+    var canvas = el('loopBrace');
+    var bounds = effectiveLoopBounds();
+    LOOP_DRAG = {
+      pointer: event.pointerId,
+      kind: zone,
+      target: canvas,
+      startBase: bounds.start,
+      endBase: bounds.end,
+      anchorTimeMs: positionFromClientX(event.clientX)
+    };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add(zone === 'move' ? 'loop-dragging-move' : 'loop-dragging-resize');
+  }
+
+  function updateLoopDrag(event) {
+    if (!LOOP_DRAG || LOOP_DRAG.pointer !== event.pointerId) { return; }
+    var duration = Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1);
+    var currentTimeMs = positionFromClientX(event.clientX);
+    var delta = currentTimeMs - LOOP_DRAG.anchorTimeMs;
+    var start = LOOP_DRAG.startBase;
+    var end = LOOP_DRAG.endBase;
+    if (LOOP_DRAG.kind === 'resize-start') {
+      start = clamp(Math.round(snappedTimeMs(LOOP_DRAG.startBase + delta)), 0, end - 1);
+    } else if (LOOP_DRAG.kind === 'resize-end') {
+      end = clamp(Math.round(snappedTimeMs(LOOP_DRAG.endBase + delta)), start + 1, duration);
+    } else {
+      // Body drag: shift both edges by the same snapped amount, so the
+      // region's length never changes mid-drag the way snapping each edge
+      // independently would let it.
+      var span = end - start;
+      var shift = Math.round(snappedTimeMs(LOOP_DRAG.startBase + delta)) - LOOP_DRAG.startBase;
+      start = clamp(LOOP_DRAG.startBase + shift, 0, duration - span);
+      end = start + span;
+    }
+    LOOP_DRAG.liveStart = start;
+    LOOP_DRAG.liveEnd = end;
+    queueDraw();
+  }
+
+  function commitLoop(startMs, endMs) {
+    if (!api()) { queueDraw(); return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Updating loop...');
+    api().set_loop(Math.round(startMs), Math.round(endMs)).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) {
+      setBusy(false);
+      fail(error);
+      render();
+    });
+  }
+
+  function endLoopDrag(event) {
+    if (!LOOP_DRAG || LOOP_DRAG.pointer !== event.pointerId) { return; }
+    var drag = LOOP_DRAG;
+    LOOP_DRAG = null;
+    try { drag.target.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    drag.target.classList.remove('loop-dragging-move', 'loop-dragging-resize');
+    if (event.type === 'pointercancel' || drag.liveStart === undefined) { queueDraw(); return; }
+    if (drag.liveStart === drag.startBase && drag.liveEnd === drag.endBase) { queueDraw(); return; }
+    commitLoop(drag.liveStart, drag.liveEnd);
+  }
+
+  // ---- the song-length handle, at the right edge of the roll's own extent ----
+  //
+  // Same resize-handle treatment Phase 2 already established for a note's
+  // right edge (NOTE_RESIZE_HANDLE_PX, the .note-resize cursor class): a
+  // pointer within that many pixels of where the song currently ends grabs
+  // this instead of starting a seek. It never competes with a note's own
+  // edge -- hoveredRenderEvent is checked first in beginCanvasSeek below, so
+  // a note sitting at the song's end still wins its own drag.
+
+  function songLengthHandleCanvasX() {
+    var viewport = el('pianoRollViewport');
+    var duration = Number(STATE.preview && STATE.preview.duration_ms) || 0;
+    return contentXAtTime(duration) - viewport.scrollLeft;
+  }
+
+  function atSongLengthHandle(event) {
+    if (!hasSong()) { return false; }
+    var rect = el('pianoRoll').getBoundingClientRect();
+    var pointerX = event.clientX - rect.left;
+    return Math.abs(pointerX - songLengthHandleCanvasX()) <= NOTE_RESIZE_HANDLE_PX;
+  }
+
+  function beginSongLengthDrag(event) {
+    var canvas = el('pianoRoll');
+    SONG_LENGTH_DRAG = {
+      pointer: event.pointerId,
+      target: canvas,
+      base: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0),
+      anchorTimeMs: positionFromClientX(event.clientX)
+    };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.classList.add('note-resize');
+  }
+
+  function updateSongLengthDrag(event) {
+    if (!SONG_LENGTH_DRAG || SONG_LENGTH_DRAG.pointer !== event.pointerId) { return; }
+    var currentTimeMs = positionFromClientX(event.clientX);
+    var delta = currentTimeMs - SONG_LENGTH_DRAG.anchorTimeMs;
+    SONG_LENGTH_DRAG.live = Math.max(1, Math.round(snappedTimeMs(SONG_LENGTH_DRAG.base + delta)));
+    queueDraw();
+  }
+
+  function commitSongLengthDrag(value) {
+    if (!api()) { queueDraw(); return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Setting song length...');
+    api().set_song_length(Math.round(value)).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) {
+      setBusy(false);
+      fail(error);
+      render();
+    });
+  }
+
+  function endSongLengthDrag(event) {
+    if (!SONG_LENGTH_DRAG || SONG_LENGTH_DRAG.pointer !== event.pointerId) { return; }
+    var drag = SONG_LENGTH_DRAG;
+    SONG_LENGTH_DRAG = null;
+    try { drag.target.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    drag.target.classList.remove('note-resize');
+    if (event.type === 'pointercancel' || drag.live === undefined || drag.live === drag.base) {
+      queueDraw();
+      return;
+    }
+    commitSongLengthDrag(drag.live);
+  }
+
   function beginCanvasSeek(event) {
     if (!hasSong()) { return; }
     NOTE_POINTER = { clientX: event.clientX, clientY: event.clientY };
@@ -3694,6 +3999,12 @@
       event.preventDefault();
       pausePlayback();
       beginNoteDrag(event, hit, noteEdgeZone(hit));
+      return;
+    }
+    if (atSongLengthHandle(event)) {
+      event.preventDefault();
+      pausePlayback();
+      beginSongLengthDrag(event);
       return;
     }
     beginTimelineSeek(event, true);
@@ -3711,6 +4022,10 @@
       else { updateNoteDragMove(event); }
       return;
     }
+    if (SONG_LENGTH_DRAG && SONG_LENGTH_DRAG.pointer === event.pointerId) {
+      updateSongLengthDrag(event);
+      return;
+    }
     if (!SEEK_DRAG || SEEK_DRAG.pointer !== event.pointerId) { return; }
     SEEK_DRAG.clientX = event.clientX;
     setPosition(positionFromClientX(event.clientX), false);
@@ -3719,6 +4034,10 @@
   function endCanvasSeek(event) {
     if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
       endNoteDrag(event);
+      return;
+    }
+    if (SONG_LENGTH_DRAG && SONG_LENGTH_DRAG.pointer === event.pointerId) {
+      endSongLengthDrag(event);
       return;
     }
     if (!SEEK_DRAG || SEEK_DRAG.pointer !== event.pointerId) { return; }
@@ -4283,10 +4602,37 @@
     AUDIO.scheduledThrough = horizon;
   }
 
+  // Reaching the loop's end while "Loop playback" is on wraps back to its
+  // start instead of finishing the song -- extends the look-ahead scheduler
+  // rather than replacing it: stop whatever was queued past the wrap point,
+  // then re-anchor and re-schedule from loop start exactly the way
+  // startPlayback does from AUDIO.position, so the same code path handles
+  // "begin playing here" whether that beginning is the transport or a wrap.
+  function wrapLoopPlayback() {
+    var sources = AUDIO.sources.slice();
+    AUDIO.sources = [];
+    sources.forEach(function (source) {
+      try { source.stop(); } catch (_error) { /* already ended */ }
+    });
+    var start = loopStartMs();
+    AUDIO.anchorPosition = start;
+    AUDIO.anchorTime = AUDIO.context.currentTime;
+    AUDIO.nextIndex = firstFutureEvent(start);
+    AUDIO.scheduledThrough = start;
+    scheduleActiveAt(start);
+    scheduleAhead();
+    renderPosition(start, true);
+  }
+
   function animationTick() {
     if (!AUDIO.playing) { return; }
     var position = currentPosition();
     var duration = (STATE.preview && STATE.preview.duration_ms) || 0;
+    if (loopEnabledState() && position >= loopEndMs()) {
+      wrapLoopPlayback();
+      AUDIO.frame = requestAnimationFrame(animationTick);
+      return;
+    }
     if (position >= duration) {
       finishPlayback();
       return;
@@ -4414,6 +4760,8 @@
     el('transportPlay').setAttribute('aria-label', AUDIO.playing ? 'Pause' : 'Play');
     el('tempoInput').disabled = !playable;
     el('tempoBox').classList.toggle('disabled', !playable);
+    el('loopPlaybackBtn').disabled = !playable;
+    el('loopPlaybackBtn').setAttribute('aria-pressed', loopEnabledState() ? 'true' : 'false');
     renderHorizontalScrollLock();
     updateMenuState();
   }
@@ -6564,6 +6912,83 @@
     }, function (error) { setBusy(false); fail(error); });
   }
 
+  // Separate from exportMap: it windows a throwaway copy of the song to the
+  // loop region first (see Session.export_loop), so it always writes a
+  // different set of bytes to the same rawmap.json slot -- one export is the
+  // whole song, this one is the loop only.
+  function exportLoop() {
+    closeMenus();
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Exporting loop...');
+    api().export_loop().then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      if (response.stats) { adopt({ stats: response.stats }, sequence); }
+      renderStatus();
+      renderWarnings();
+      toast(response.replaced ? 'Loop exported and previous map replaced' : 'Loop exported', 'ok');
+      stamp(baseName(response.destination));
+      if (response.sidecar_error) { toast(response.sidecar_error, 'warn'); }
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  // The transport's "Loop playback" switch. Not a settings-document patch --
+  // loop_enabled lives on the Song, not the levers apply_settings projects --
+  // so this calls its own bridge method directly, the same way commitLoop
+  // does for the brace itself.
+  function toggleLoopPlayback() {
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    api().set_loop_enabled(!loopEnabledState()).then(function (response) {
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) { fail(error); });
+  }
+
+  function openSongLengthModal() {
+    closeMenus();
+    if (!hasSong()) { return; }
+    var current = Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0);
+    el('songLengthInput').value = String(Math.max(1, current));
+    el('songLengthOverlay').hidden = false;
+    el('songLengthInput').focus();
+    el('songLengthInput').select();
+  }
+
+  function closeSongLengthModal() {
+    el('songLengthOverlay').hidden = true;
+  }
+
+  function commitSongLength() {
+    var value = Math.max(1, Math.round(Number(el('songLengthInput').value) || 0));
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Setting song length...');
+    api().set_song_length(value).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      closeSongLengthModal();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function initSongLengthModal() {
+    el('menuSongLength').addEventListener('click', openSongLengthModal);
+    el('songLengthClose').addEventListener('click', closeSongLengthModal);
+    el('songLengthCancel').addEventListener('click', closeSongLengthModal);
+    el('songLengthSet').addEventListener('click', commitSongLength);
+    el('songLengthOverlay').addEventListener('pointerdown', function (event) {
+      if (event.target === this) { closeSongLengthModal(); }
+    });
+    el('songLengthInput').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') { event.preventDefault(); commitSongLength(); }
+      else if (event.key === 'Escape') { event.preventDefault(); closeSongLengthModal(); }
+    });
+  }
+
   function undoLastEdit() {
     if (!api() || !hasSong()) { return; }
     var sequence = nextRequest();
@@ -6667,9 +7092,11 @@
       event.solo_excluded = soloActive && !entry.soloed;
       // `audible` came from Python computed under the OLD mix state; it has
       // to be re-derived here or a note just unmuted stays excluded by its
-      // own stale flag one line down. `out_of_key_range` is the only other
-      // input to Python's formula and a mix-only patch never touches it.
-      event.audible = !event.out_of_key_range && !event.muted && !event.solo_excluded;
+      // own stale flag one line down. `out_of_key_range` and `beyond_length`
+      // are the only other inputs to Python's formula and a mix-only patch
+      // never touches either.
+      event.audible = !event.out_of_key_range && !event.beyond_length &&
+        !event.muted && !event.solo_excluded;
       // `converted` is Python's answer to a harder question -- whether this
       // note also survives polyphony and voice-count thinning -- and it
       // never runs that thinning on a muted or solo-excluded note, so a note
@@ -7111,6 +7538,20 @@
     ruler.addEventListener('pointermove', moveCanvasSeek);
     ruler.addEventListener('pointerup', endCanvasSeek);
     ruler.addEventListener('pointercancel', endCanvasSeek);
+    // The brace's own strip, deliberately a separate element from the ruler
+    // above it -- see the comment on drawLoopBrace / .loop-brace -- so a drag
+    // meant to scrub never lands on the loop and a drag meant to move the
+    // loop never seeks.
+    var brace = el('loopBrace');
+    brace.addEventListener('pointerdown', beginLoopDrag);
+    brace.addEventListener('pointermove', function (event) {
+      updateLoopDrag(event);
+      updateLoopBraceHover(event);
+    });
+    brace.addEventListener('pointerleave', function () { if (!LOOP_DRAG) { clearLoopBraceHover(); } });
+    brace.addEventListener('pointerup', endLoopDrag);
+    brace.addEventListener('pointercancel', endLoopDrag);
+    el('loopPlaybackBtn').addEventListener('click', toggleLoopPlayback);
     var lanes = el('lanesView');
     lanes.addEventListener('pointerdown', beginLaneTimelineSeek);
     lanes.addEventListener('pointermove', moveCanvasSeek);
@@ -7180,6 +7621,7 @@
     initLanesScrollSync();
     initNoteInspector();
     initSoundBrowser();
+    initSongLengthModal();
     initMasterVolume();
     initTempoControl();
     el('notificationsBtn').addEventListener('click', toggleNotifications);
@@ -7192,6 +7634,7 @@
     el('menuOpenProject').addEventListener('click', openProject);
     el('menuSaveProject').addEventListener('click', saveProject);
     el('menuExport').addEventListener('click', exportMap);
+    el('menuExportLoop').addEventListener('click', exportLoop);
     el('menuExit').addEventListener('click', function () { closeMenus(); if (api()) { api().win_close(); } });
     el('menuAudio').addEventListener('click', refreshAudio);
     el('audioBanner').addEventListener('click', refreshAudio);

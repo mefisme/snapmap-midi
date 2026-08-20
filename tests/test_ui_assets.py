@@ -268,6 +268,7 @@ def test_the_interface_ships_only_its_curated_lucide_icon_subset():
         "music-2",
         "pause",
         "play",
+        "repeat",
         "search",
         "settings",
         "square",
@@ -423,7 +424,7 @@ def test_piano_black_keys_and_the_scrollbar_corner_finish_the_rulers():
     # over, or lanes mode would leave that gutter's width sitting empty.
     assert re.search(
         r"\.roll-pane::after\s*\{[^}]*top:\s*0;[^}]*left:\s*0;[^}]*right:\s*0;"
-        r"[^}]*height:\s*31px;[^}]*border-bottom:\s*1px solid var\(--border2\)",
+        r"[^}]*height:\s*43px;[^}]*border-bottom:\s*1px solid var\(--border2\)",
         _CSS,
     )
     assert re.search(
@@ -504,9 +505,13 @@ def test_roll_grid_meter_and_zoom_are_view_controls_in_the_control_plane():
     assert "gridDenominator = Math.max(1, Number(gridDenominator) || ROLL.gridDenominator);" in _JS
     assert "ticksPerBeat * 4 / gridDenominator" in _JS
     assert "laneGridDenominator: 1" in _JS
-    assert "var laneLines = timingLinesAt(scrollLeft, visibleWidth, ROLL.laneGridDenominator);" in _JS
+    assert (
+        "var laneLines = timingLinesAt(scrollLeft, visibleWidth, ROLL.laneGridDenominator);" in _JS
+    )
     assert "function activeGridDenominator()" in _JS
-    assert "return ROLL_PART || ROLL_GLOBAL ? ROLL.gridDenominator : ROLL.laneGridDenominator;" in _JS
+    assert (
+        "return ROLL_PART || ROLL_GLOBAL ? ROLL.gridDenominator : ROLL.laneGridDenominator;" in _JS
+    )
     assert "ticksPerBeat * 4 / ROLL.meterDenominator * ROLL.meterNumerator" in _JS
     assert "timeAtTick(tick)" in _JS
     assert "Math.pow(2, stops / 10) * 100" in _JS
@@ -662,20 +667,19 @@ def test_track_rows_double_click_to_toggle_roll_and_switch_on_click_when_open():
 
 
 def test_every_track_has_an_explicit_settings_action_in_both_roll_modes():
-    assert 'track-settings-button' in _JS
+    assert "track-settings-button" in _JS
     assert 'settingsButton.title = "Track settings"' in _JS
     assert 'settingsButton.appendChild(iconElement("settings"))' in _JS
-    assert 'openChannelInspector(channel.key);' in _JS
-    assert 'closeChannelInspectorAndClearSelection();' in _JS
+    assert "openChannelInspector(channel.key);" in _JS
+    assert "closeChannelInspectorAndClearSelection();" in _JS
     assert (
-        'trackSettingsButton.setAttribute("aria-pressed", settingsOpen ? "true" : "false")'
-        in _JS
+        'trackSettingsButton.setAttribute("aria-pressed", settingsOpen ? "true" : "false")' in _JS
     )
     assert (
         'trackSettingsButton.title = settingsOpen ? "Close track settings" : "Track settings"'
         in _JS
     )
-    assert '.track-settings-button { opacity: .62; }' in _CSS
+    assert ".track-settings-button { opacity: .62; }" in _CSS
     assert ".track-mute-toggle.active" in _CSS
     assert re.search(r"\.track-row\s*\{[^}]*cursor:\s*pointer", _CSS)
 
@@ -828,7 +832,7 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert "pitch_follow: false," in _JS
     assert "root_midi: null," in _JS
     assert "function parsePitchReference(raw)" in _JS
-    assert 'api().sound_profile(saved.sound, channel.key, true)' in _JS
+    assert "api().sound_profile(saved.sound, channel.key, true)" in _JS
     assert 'root_source: "manual"' in _JS
     assert 'id="notePitchRange" min="-24" max="24" step="1"' in _HTML
     assert 'id="notePitchNumber" min="-24" max="24" step="1"' in _HTML
@@ -869,10 +873,19 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert "MIDI notes above or below it will pitch the sample up or down to match." in _HTML
     assert 'el("channelRootLabel").textContent = neutralReference' in _JS
     assert "Sample root (optional)" in _JS
-    assert "No natural note is set yet. Until you set one, playing any MIDI note plays this sample unchanged." in _JS
+    assert (
+        "No natural note is set yet. Until you set one, playing any MIDI note plays this sample unchanged."
+        in _JS
+    )
     assert "root === null || !isFinite(root) || neutralReference" in _JS
-    assert "No natural note is set. Playing any MIDI note plays this sample unchanged until you set one." in _JS
-    assert "Not analyzed. Playing a MIDI note plays this sample unchanged until you set a natural note." in _JS
+    assert (
+        "No natural note is set. Playing any MIDI note plays this sample unchanged until you set one."
+        in _JS
+    )
+    assert (
+        "Not analyzed. Playing a MIDI note plays this sample unchanged until you set a natural note."
+        in _JS
+    )
     assert 'noteName(60) + " sounds like " + noteName(60) +' in _JS
     assert '" — the sample is pitched " + pitchAdjustment(referenceCorrection) +' in _JS
     assert "pitchAdjustment(referenceCorrection)" in _JS
@@ -881,7 +894,7 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert "Moves every note on this track up or down in whole semitones." in _HTML
     assert "channelFineTuneRange" not in _HTML
     assert "channelFineTuneNumber" not in _HTML
-    assert 'partPatch(channel, { fine_tune_cents: value })' not in _JS
+    assert "partPatch(channel, { fine_tune_cents: value })" not in _JS
     assert "Saved legacy track detune:" in _JS
     assert "A saved legacy detune adds" in _JS
     assert 'root_source: "manual",\n      fine_tune_cents: 0' in _JS
@@ -910,10 +923,13 @@ def test_notes_advertise_clickability_only_when_pointer_hit_testing_finds_one():
     # cursor never promises a gesture the click would not actually deliver.
     assert re.search(r"#pianoRoll\.note-resize\s*\{[^}]*cursor:\s*ew-resize", _CSS)
     assert 'canvas.classList.toggle("note-hover", !!hit)' in _JS
+    # Phase 3's song-length handle shares this same cursor class, gated on
+    # the same "no note claimed it first" rule its own drag uses.
     assert (
-        'canvas.classList.toggle("note-resize", zone === "resize" || zone === "resize-start")'
-        in _JS
-    )
+        'var resizeCursor = zone === "resize" || zone === "resize-start" ||\n'
+        "      (!hit && atSongLengthHandle(event));"
+    ) in _JS
+    assert 'canvas.classList.toggle("note-resize", resizeCursor)' in _JS
     assert 'el("pianoRoll").classList.remove("note-hover", "note-resize")' in _JS
 
 
@@ -932,12 +948,9 @@ def test_preview_uses_the_compiler_pitch_and_volume_values_without_rederiving_th
     assert "body.root_midi = null;" in _JS
     assert "body.detected_root_midi = null;" in _JS
     assert "body.fine_tune_cents = 0;" in _JS
-    assert (
-        "Sound selected unchanged. Analyze or tune it only when you want pitch following."
-        in _JS
-    )
+    assert "Sound selected unchanged. Analyze or tune it only when you want pitch following." in _JS
     assert "var activePitch = note.pitch_semitones;" in _JS
-    assert 'Math.round(Number(activePitch) || 0)' in _JS
+    assert "Math.round(Number(activePitch) || 0)" in _JS
     assert "function notePitchOverrideKey(noteId)" in _JS
     assert 'return note.pitch_follow ? "follow_pitch_semitones" : "pitch_semitones"' in _JS
     assert 'key === "pitch_semitones" || key === "follow_pitch_semitones"' in _JS
@@ -1029,7 +1042,7 @@ def test_bottom_control_plane_exposes_the_persisted_master_volume():
     assert "paintMasterVolume(tuning().master_volume_db)" in _JS
     assert "el('masterVolume').disabled = !song" in _JS
     assert '"Track " + signed(note.track_volume_db)' in _JS
-    assert 'signed(note.master_volume_db)' in _JS
+    assert "signed(note.master_volume_db)" in _JS
     assert '" dB; output " + signed(note.volume_db)' in _JS
 
 
@@ -1056,7 +1069,9 @@ def test_track_lanes_expose_a_synchronized_horizontal_scrollbar():
     assert "function laneDisplayEvents(partKey)" in _JS
     assert "var LANE_EVENTS_CACHE = { source: null, byPart: null };" in _JS
     assert "var events = laneDisplayEvents(channel.key);" in _JS
-    assert "var laneLines = timingLinesAt(scrollLeft, visibleWidth, ROLL.laneGridDenominator);" in _JS
+    assert (
+        "var laneLines = timingLinesAt(scrollLeft, visibleWidth, ROLL.laneGridDenominator);" in _JS
+    )
     assert "function timingLinesAt(scrollLeft, viewportWidth, gridDenominator)" in _JS
     assert "function drawLaneTimingGrid(context, lines, width, height, palette)" in _JS
     assert "drawLaneTimingGrid(context, lines, width, height, palette);" in _JS
@@ -1076,7 +1091,7 @@ def test_track_lanes_expose_a_synchronized_horizontal_scrollbar():
 
 
 def test_space_is_reserved_for_transport_outside_typing_fields():
-    assert "input[type=\"text\"], input[type=\"search\"], textarea" in _JS
+    assert 'input[type="text"], input[type="search"], textarea' in _JS
     assert "if (!typing && event.code === 'Space')" in _JS
     assert "Promise.resolve(context.resume())" in _JS
     assert "if (event.key === 'Enter') { event.preventDefault(); action(); }" in _JS
@@ -1112,21 +1127,21 @@ def test_track_attack_and_hard_stop_are_optional_track_only_controls():
     assert '<label for="channelAttackRange">Track Attack</label>' in _HTML
     assert 'id="channelAttackEnabled"' in _HTML
     assert 'id="channelAttackRange" min="10" max="5000"' in _HTML
-    assert 'including Automatic instruments.' in _HTML
+    assert "including Automatic instruments." in _HTML
     assert "function syncChannelAttack(channel)" in _JS
     assert "function bindChannelAttack()" in _JS
     assert "partPatch(part, { attack_ms: value })" in _JS
-    assert "id=\"channelHardStopEnabled\"" in _HTML
-    assert "id=\"channelHardStop\"" in _HTML
+    assert 'id="channelHardStopEnabled"' in _HTML
+    assert 'id="channelHardStop"' in _HTML
     assert "function syncChannelHardStop(channel)" in _JS
     assert "function bindChannelHardStop()" in _JS
     assert "partPatch(part, { hard_stop: value })" in _JS
 
 
 def test_note_off_is_an_optional_track_and_song_default_control():
-    assert '<span>Default Note Off</span>' in _HTML
+    assert "<span>Default Note Off</span>" in _HTML
     assert 'id="noteOff"' in _HTML
-    assert '<span>Track Note Off</span>' in _HTML
+    assert "<span>Track Note Off</span>" in _HTML
     assert 'id="channelNoteOffEnabled"' in _HTML
     assert 'id="channelNoteOff"' in _HTML
     assert "function channelNoteOff(channel)" in _JS
@@ -1196,7 +1211,9 @@ def test_toggling_a_limit_off_and_back_on_remembers_its_number():
     assert "function rememberLimit(scope, value)" in _JS
     assert "function recallLimit(scope, fallback)" in _JS
 
-    limit_fn = _JS.split("function syncChannelLimit(channel, key, fallbackKey, ids, describe, fallbackValue) {", 1)[1]
+    limit_fn = _JS.split(
+        "function syncChannelLimit(channel, key, fallbackKey, ids, describe, fallbackValue) {", 1
+    )[1]
     limit_fn = limit_fn.split("\n  function syncChannelPoly", 1)[0]
     assert "if (on) { rememberLimit(scope, own); }" in limit_fn
     assert "recallLimit(scope, songWide || fallbackValue || 32)" in limit_fn
@@ -1454,7 +1471,7 @@ def test_the_part_panel_can_say_a_part_is_a_kit():
     for mode in ("auto", "kit", "melodic"):
         assert '<option value="%s">' % mode in _HTML
     assert "function syncChannelPercussion(channel)" in _JS
-    assert 'partPatch(channel, { percussion: this.value })' in _JS
+    assert "partPatch(channel, { percussion: this.value })" in _JS
 
 
 def test_the_part_panel_lists_the_keys_a_kit_plays():
@@ -1539,8 +1556,8 @@ def test_a_drum_key_row_says_which_table_answered_for_it():
     origin makes "save as my default" look like a no-op on the keys the song
     already claims."""
     assert 'choice.scope === "song" ? "this song" : "your default"' in _JS
-    assert 'STATE.drum_defaults' in _JS
-    assert 'STATE.catalog && STATE.catalog.drum_shipped' in _JS
+    assert "STATE.drum_defaults" in _JS
+    assert "STATE.catalog && STATE.catalog.drum_shipped" in _JS
     # The redraw payload has to carry it, or the badge is stale the moment a
     # default is saved.
     assert "'drum_defaults'" in _JS
@@ -1558,7 +1575,7 @@ def test_the_key_picker_draws_on_the_percussive_folders_as_well():
     # Both halves of the rule. Dropping either one is silent: without the
     # folder check the picker fills with weapon chirps, and without the loop
     # check it offers sounds that hold an emitter open forever.
-    assert 'event.looping !== false || event.looping_known !== true' in _JS
+    assert "event.looping !== false || event.looping_known !== true" in _JS
     assert 'path.indexOf(folder + "/") === 0' in _JS
 
 
@@ -1590,10 +1607,7 @@ def test_global_and_track_voice_controls_are_both_exposed():
     assert "including notes layered on the shared emitter" in _HTML
     assert "Ringing sample tails do not consume this limit" in _HTML
     assert "bindPair('songPolyphonyRange', 'songPolyphonyNumber', 'song_polyphony'" in _JS
-    assert (
-        "Sets the maximum number of dedicated sounds the whole song can play at once."
-        in _HTML
-    )
+    assert "Sets the maximum number of dedicated sounds the whole song can play at once." in _HTML
     assert '<label for="channelVoicesRange">Track Voices</label>' in _HTML
     assert 'id="channelVoicesRange" min="1" max="128"' in _HTML
     assert "Caps how many Global Voices this track can use." in _HTML
@@ -1609,8 +1623,8 @@ def test_global_and_track_voice_controls_are_both_exposed():
     assert 'id="channelSustainEnabled"' in _HTML
     assert 'id="channelSustainRange" min="50" max="5000"' in _HTML
     assert "It does not change how many voices the track can use." in _HTML
-    assert 'function syncChannelVoices(channel)' in _JS
-    assert 'function syncChannelSustain(channel)' in _JS
+    assert "function syncChannelVoices(channel)" in _JS
+    assert "function syncChannelSustain(channel)" in _JS
     assert 'bindChannelLimit("voices", "max_speakers"' in _JS
     assert 'bindChannelLimit("sustain_ms", "cap_sustain_ms"' in _JS
     assert '<label for="channelGlideRange">Track glide</label>' in _HTML
@@ -1713,7 +1727,7 @@ def test_channel_settings_are_grouped_into_four_tabs_not_one_scrolling_list():
         ("voices", "Voices"),
     ):
         assert 'data-tab="%s"' % tab in _HTML
-        assert '<span>%s</span></button>' % label in _HTML
+        assert "<span>%s</span></button>" % label in _HTML
     # Not ARIA tabs: this is a small panel switcher inside one modal, not a
     # second page of the workstation, and the app deliberately has no other
     # tab-based navigation (see test_the_workstation_is_one_surface_with_one_global_transport).
@@ -1733,9 +1747,10 @@ def test_static_control_explanations_moved_behind_an_info_disclosure():
     assert _HTML.count('class="tip-trigger"') >= 10
     assert 'class="tip-text" role="tooltip"' in _HTML
     assert "Moves every note on this track up or down in whole semitones." in _HTML
-    assert "control-description" not in _HTML.split('id="channelInspector"', 1)[1].split(
-        'id="noteInspector"', 1
-    )[0]
+    assert (
+        "control-description"
+        not in _HTML.split('id="channelInspector"', 1)[1].split('id="noteInspector"', 1)[0]
+    )
 
 
 def test_track_release_and_hard_stop_are_two_separate_groups():
@@ -1784,18 +1799,33 @@ def test_track_glide_is_exact_sound_only_like_manual_calibration():
 
 def test_track_settings_has_a_restore_defaults_button_like_conversion_settings():
     assert 'id="restoreChannelDefaults">Restore defaults</button>' in _HTML
-    assert 'el("restoreChannelDefaults").addEventListener("click", restoreSelectedChannelDefaults)' in _JS
+    assert (
+        'el("restoreChannelDefaults").addEventListener("click", restoreSelectedChannelDefaults)'
+        in _JS
+    )
     assert "function restoreSelectedChannelDefaults()" in _JS
     # Only fields an actual Track settings control writes -- not the
     # instrument assignment or mute/solo, which live outside this panel.
     for field in (
-        "percussion", "pitch_transpose", "pitch_octave", "volume_db",
-        "voices", "polyphony", "attack_ms", "glide_ms", "sustain_ms",
-        "release_s", "hard_stop", "note_off", "note_off_floor_ms", "key_range",
+        "percussion",
+        "pitch_transpose",
+        "pitch_octave",
+        "volume_db",
+        "voices",
+        "polyphony",
+        "attack_ms",
+        "glide_ms",
+        "sustain_ms",
+        "release_s",
+        "hard_stop",
+        "note_off",
+        "note_off_floor_ms",
+        "key_range",
     ):
-        assert '"%s"' % field in _JS.split("var CHANNEL_DEFAULT_RESET_FIELDS = [", 1)[1].split(
-            "];", 1
-        )[0]
+        assert (
+            '"%s"' % field
+            in _JS.split("var CHANNEL_DEFAULT_RESET_FIELDS = [", 1)[1].split("];", 1)[0]
+        )
     reset_fields = _JS.split("var CHANNEL_DEFAULT_RESET_FIELDS = [", 1)[1].split("];", 1)[0]
     assert '"sound"' not in reset_fields
     assert '"family"' not in reset_fields
@@ -1816,7 +1846,10 @@ def test_limit_bass_note_duration_has_a_description():
     lever in this panel -- and unlike Track Sustain Limit, it deliberately
     caps by REGISTER rather than by track, which is easy to mistake for a
     duplicate of Sustain Limit above it without that spelled out."""
-    assert '<label class="check-line"><input type="checkbox" id="bassEnabled"> Limit bass-note duration</label>' in _HTML
+    assert (
+        '<label class="check-line"><input type="checkbox" id="bassEnabled"> Limit bass-note duration</label>'
+        in _HTML
+    )
     assert (
         "Caps how long any note below the chosen pitch may ring, no matter which "
         "track or instrument played it" in _HTML

@@ -344,17 +344,29 @@
         <details class="channel-advanced-settings" id="channelPitchAdvanced">
           <summary>Manual sample calibration</summary>
           <div class="channel-advanced-body">
-            <div class="channel-pitch-analysis-row">
-              <button type="button" class="btn" id="channelAnalyzePitch">Analyze sound</button>
-              <button type="button" class="btn" id="channelClearPitch">Clear pitch setup</button>
-              <span class="tip"><button type="button" class="tip-trigger" aria-label="What analyze and clear do"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Finds the sound's natural note and cents offset. Confidence shows how reliable the detection is. Clear pitch setup removes analysis and manual calibration, then plays the sound unchanged.</span></span>
+            <div class="channel-preview-group">
+              <div class="channel-pitch-analysis-row">
+                <button type="button" class="btn" id="channelAnalyzePitch">Analyze sound</button>
+                <button type="button" class="btn" id="channelClearPitch">Clear pitch setup</button>
+                <span class="tip"><button type="button" class="tip-trigger" aria-label="What analyze and clear do"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Finds the sound's natural note and cents offset. Confidence shows how reliable the detection is. Clear pitch setup removes analysis and manual calibration, then plays the sound unchanged.</span></span>
+              </div>
+              <div class="expression-readout" id="channelPitchAnalysis">Not analyzed yet.</div>
             </div>
-            <div class="expression-readout" id="channelPitchAnalysis">Not analyzed yet.</div>
 
-            <div class="channel-pitch-analysis-row channel-reference-row">
-              <button type="button" class="btn" id="channelPlayReference">Play C4 reference</button>
-              <span class="hint" id="channelReferenceHelp">MIDI 60 · 261.63 Hz</span>
-              <span class="tip"><button type="button" class="tip-trigger" aria-label="What the reference tone does"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Loops a built-in pure tone until you press Stop. It uses no DOOM sound asset and never changes the track.</span></span>
+            <div class="channel-preview-group">
+              <div class="channel-pitch-analysis-row">
+                <button type="button" class="btn" id="channelPlayReference">Play C4 reference</button>
+                <span class="hint" id="channelReferenceHelp">MIDI 60 · 261.63 Hz</span>
+                <span class="tip"><button type="button" class="tip-trigger" aria-label="What the reference tone does"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Loops a built-in pure tone until you press Stop. It uses no DOOM sound asset and never changes the track.</span></span>
+              </div>
+              <div class="channel-pitch-analysis-row">
+                <button type="button" class="btn" id="channelPlaySample">Play raw sample</button>
+                <span class="tip"><button type="button" class="tip-trigger" aria-label="What the raw sample preview does"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Plays this track's sound exactly as recorded, with no pitch shift. Compare it against the C4 reference tone by ear to hear what note the sample is really at, then type that note below.</span></span>
+              </div>
+              <div class="channel-pitch-analysis-row">
+                <button type="button" class="btn" id="channelPlaySamplePitched">Play sample at C4</button>
+                <span class="tip"><button type="button" class="tip-trigger" aria-label="What playing the sample at C4 does"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Retunes the sample using the natural note typed below and plays it. If that note is correct, this matches the C4 reference tone exactly -- a wrong note is audible as a beating or clashing pitch, no ear training needed.</span></span>
+              </div>
             </div>
 
             <div class="control-title"><label for="channelCalibrationRange">Coarse sample tuning</label><span class="control-title-meta"><span class="hint">semitones</span><span class="tip"><button type="button" class="tip-trigger" aria-label="What coarse tuning does"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-info"></use></svg></button><span class="tip-text" role="tooltip">Calibrates an unanalyzed sound against the reference in whole semitones. Positive pitches the sample higher; negative pitches it lower. Every MIDI note then follows from that tuning.</span></span></span></div>
@@ -366,7 +378,7 @@
 
             <label class="field-label" id="channelRootLabel" for="channelRootValue">Sample root or Follow MIDI reference</label>
             <input type="text" class="mono" id="channelRootValue" placeholder="60 or C4 (optional)" autocomplete="off">
-            <div class="expression-readout" id="channelRootDescription">Shows the analyzer result or the note inferred from manual sample tuning. Edit it only when you already know the sound's natural note. Correction equals the imported MIDI note minus this value.</div>
+            <div class="expression-readout" id="channelRootDescription">Type the pitch this sample naturally plays at, such as D2 or C#3. MIDI notes above or below it will pitch the sample up or down to match.</div>
             <div class="expression-readout" id="channelRootHelp"></div>
           </div>
         </details>

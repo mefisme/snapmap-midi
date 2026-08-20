@@ -833,7 +833,10 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert "440 * Math.pow(2, (60 - 69) / 12)" in _JS
     assert "oscillator.stop(now + 1.52)" not in _JS
     assert 'el("channelPlayReference").addEventListener("click", togglePitchReferenceTone)' in _JS
-    assert "stopPitchReferenceTone();\n    CHANNEL_INSPECTOR_OPEN = false;" in _JS
+    assert (
+        "stopPitchReferenceTone();\n    stopSamplePreview();\n    CHANNEL_INSPECTOR_OPEN = false;"
+        in _JS
+    )
     assert "Coarse sample tuning" in _HTML
     assert "Positive pitches the sample higher; negative pitches it lower." in _HTML
     assert "Sample tuning fine adjustment" in _HTML
@@ -845,16 +848,16 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert 'root_source: "manual"' in _JS
     assert "var sendCalibration = debounce(updateManualSampleCalibration, 180)" in _JS
     assert 'placeholder="60 or C4 (optional)"' in _HTML
-    assert "Shows the analyzer result or the note inferred from manual sample tuning." in _HTML
-    assert "Edit it only when you already know the sound's natural note." in _HTML
-    assert "Correction equals the imported MIDI note minus this value." in _HTML
+    assert "Type the pitch this sample naturally plays at, such as D2 or C#3." in _HTML
+    assert "MIDI notes above or below it will pitch the sample up or down to match." in _HTML
     assert 'el("channelRootLabel").textContent = neutralReference' in _JS
     assert "Sample root (optional)" in _JS
-    assert "No sample root has been set." in _JS
+    assert "No natural note is set yet. Until you set one, playing any MIDI note plays this sample unchanged." in _JS
     assert "root === null || !isFinite(root) || neutralReference" in _JS
-    assert 'noteName(NEUTRAL_ROOT_MIDI) + " reference; the raw sound plays unchanged there."' in _JS
-    assert "Not analyzed. Follow MIDI note uses an assumed" in _JS
-    assert 'noteName(60) + " automatic correction: "' in _JS
+    assert "No natural note is set. Playing any MIDI note plays this sample unchanged until you set one." in _JS
+    assert "Not analyzed. Playing a MIDI note plays this sample unchanged until you set a natural note." in _JS
+    assert 'noteName(60) + " sounds like " + noteName(60) +' in _JS
+    assert '" — the sample is pitched " + pitchAdjustment(referenceCorrection) +' in _JS
     assert "pitchAdjustment(referenceCorrection)" in _JS
     assert '"Pitch formula: imported MIDI note − " + pitchName(root)' in _JS
     assert "pitchAdjustment(referenceCorrection + adjustment + 12 * folded)" in _JS

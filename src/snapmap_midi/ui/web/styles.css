@@ -349,8 +349,24 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .channel-setting-primary input:disabled { opacity: .72; }
 .channel-pitch-group > .expression-readout { margin-top: 8px; }
 .channel-advanced-body > .control-title { margin-top: 13px; }
-.channel-pitch-analysis-row { display: flex; align-items: center; gap: 9px; margin-bottom: 3px; }
-.channel-reference-row { margin-top: 0; }
+/* A fixed button column so "Analyze sound", "Play C4 reference", "Play raw
+   sample" and "Play sample at C4" line up on one edge instead of each row
+   being only as wide as its own label. The tip icon gets an explicit column
+   so it always lands at the row's trailing edge -- the leftward-opening
+   bubble needs that room, and a short row (one button, no hint span) would
+   otherwise strand the icon near the left edge with nowhere to open into. */
+.channel-pitch-analysis-row {
+  display: grid;
+  grid-template-columns: 148px 1fr auto;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 3px;
+}
+.channel-pitch-analysis-row .tip { grid-column: 3; }
+/* Two clusters -- work the raw sound (play it, analyze it), then compare it
+   against the reference tone (play it, play the sample tuned to it) -- read
+   as separate groups instead of one run-on list of buttons. */
+.channel-preview-group + .channel-preview-group { margin-top: 12px; }
 .channel-advanced-body .field-label { display: block; margin: 12px 0 6px; color: var(--text); font-weight: 600; }
 .channel-advanced-body > input[type=text] { width: 100%; }
 .channel-advanced-settings { border-bottom: 1px solid var(--border); }
@@ -359,7 +375,7 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .channel-advanced-settings > summary::after { content: "\203A"; color: var(--muted); font-size: 20px; line-height: 1; transform-origin: center; transition: transform .12s ease; }
 .channel-advanced-settings[open] > summary::after { transform: rotate(90deg); }
 .channel-advanced-settings > summary:hover { color: var(--sel); }
-.channel-advanced-body { border-top: 1px solid var(--border); padding-top: 12px; }
+.channel-advanced-body { border-top: 1px solid var(--border); padding-top: 12px; padding-bottom: 12px; }
 .channel-advanced-body > .control-group:last-child { border-bottom: 0; }
 
 /* Track settings tab strip. */
@@ -415,7 +431,7 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .key-range-values { display: flex; justify-content: space-between; gap: 12px; margin: 2px 2px 0; }
 .key-range-values .key-range-value { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--muted); }
 .key-range-values input[type=number] { width: 52px; }
-.channel-facts { margin: 5px 0 0; }
+.channel-facts { margin: 0; }
 .channel-facts > div { display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--border); }
 .channel-facts dt { color: var(--muted); }
 .channel-facts dd { min-width: 0; margin: 0; text-align: right; overflow-wrap: anywhere; }

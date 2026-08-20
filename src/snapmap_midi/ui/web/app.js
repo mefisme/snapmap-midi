@@ -115,6 +115,10 @@
   var LAST_SIDECAR_ERROR = '';
   var PITCH_REFERENCE_TONE = null;
   var PITCH_REFERENCE_TOKEN = 0;
+  var SAMPLE_PREVIEW_SOURCE = null;
+  var SAMPLE_PREVIEW_TOKEN = 0;
+  var SAMPLE_PREVIEW_BUFFERS = {};
+  var SAMPLE_PREVIEW_MODE = null;
 
   var SOUND_BROWSER = {
     open: false,
@@ -1823,6 +1827,19 @@
     });
   }
 
+  // The one call site for fetching a sound's raw decoded audio -- the sound
+  // browser's audition and the channel inspector's sample preview both play
+  // back through their own pipeline, but neither should have its own copy of
+  // the fetch-and-decode step.
+  function fetchSoundBuffer(context, name) {
+    return api().preview_sound(name).then(function (response) {
+      if (!response || !response.ok) {
+        throw new Error(response && response.error || "The sound could not be previewed");
+      }
+      return decodeDataUri(context, response.data_uri);
+    });
+  }
+
   function auditionSound(eventRecord, button) {
     stopSoundAudition();
     var token = SOUND_BROWSER.auditionToken;
@@ -1834,15 +1851,9 @@
     } else if (!api()) {
       promise = Promise.reject(new Error("The audio bridge is not available"));
     } else {
-      promise = api().preview_sound(eventRecord.name).then(function (response) {
-        if (!response || !response.ok) {
-          throw new Error(response && response.error || "The sound could not be previewed");
-        }
-        var context = ensureAudioContext();
-        return decodeDataUri(context, response.data_uri).then(function (buffer) {
-          rememberAuditionBuffer(eventRecord.name, buffer);
-          return buffer;
-        });
+      promise = fetchSoundBuffer(ensureAudioContext(), eventRecord.name).then(function (buffer) {
+        rememberAuditionBuffer(eventRecord.name, buffer);
+        return buffer;
       });
     }
     promise.then(function (buffer) {
@@ -4568,6 +4579,7 @@
       : "Automatic: this track is within range, so nothing is moved.";
   }
 
+
   function syncChannelPoly(channel) {
     syncChannelLimit(channel, "polyphony", "max_poly", {
       enabled: "channelPolyEnabled", controls: "channelPolyControls",
@@ -4916,27 +4928,27 @@
       : Math.floor(totalCalibrationCents / 100);
     var calibrationCents = totalCalibrationCents - calibrationSemitones * 100;
     syncPitchReferenceButton();
+    syncSamplePreviewButtons();
     el("channelRootLabel").textContent = neutralReference
       ? "Sample root (optional)"
-      : "Inferred sample natural note";
+      : "Sample's natural note";
     // The neutral C4 anchor is implementation detail, not a discovered sample
     // root. Leave the optional field blank until analysis or the user supplies
     // a real/manual reference, while retaining that anchor for Follow MIDI.
     el("channelRootValue").value = root === null || !isFinite(root) || neutralReference
       ? "" : pitchName(root);
     el("channelRootDescription").textContent = neutralReference
-      ? "No sample root has been set. Follow MIDI note uses an internal " +
-        noteName(NEUTRAL_ROOT_MIDI) + " reference; the raw sound plays unchanged there."
-      : "Shows the analyzer result or the note inferred from manual sample tuning. Edit it only when you already know the sound's natural note. Correction equals the imported MIDI note minus this value.";
+      ? "No natural note is set yet. Until you set one, playing any MIDI note plays this sample unchanged."
+      : "Type the pitch this sample naturally plays at, such as D2 or C#3. MIDI notes above or below it will pitch the sample up or down to match.";
     el("channelRootHelp").textContent = root === null || !isFinite(root)
       ? "Enter a MIDI value such as 60 or a note such as C4. Flats are accepted."
       : neutralReference
-        ? "No sample root is set. Follow MIDI note uses an internal " + pitchReference(root) +
-          " reference; the raw sound is unchanged there."
-      : "Natural sample note: " + pitchReference(root) +
-        (entry.root_source === "manual" ? " (manual). " : ". ") +
-        noteName(60) + " automatic correction: " +
-        pitchAdjustment(referenceCorrection) + ".";
+        ? "No natural note is set. Playing any MIDI note plays this sample unchanged until you set one."
+      : "Natural note: " + pitchReference(root) +
+        (entry.root_source === "manual" ? " (typed in). " : " (detected). ") +
+        "Playing MIDI note " + noteName(60) + " sounds like " + noteName(60) +
+        " — the sample is pitched " + pitchAdjustment(referenceCorrection) +
+        " from " + pitchName(root) + " to get there.";
     syncPair("channelTransposeRange", "channelTransposeNumber", transpose);
     syncPair("channelGlideRange", "channelGlideNumber", glide);
     syncPair("channelCalibrationRange", "channelCalibrationNumber", calibrationSemitones);
@@ -4946,12 +4958,10 @@
       calibrationCents
     );
     el("channelCalibrationHelp").textContent = root === null || !isFinite(root)
-      ? "Starts from an assumed " + noteName(60) + ". Moving either tuning control enables Follow MIDI note and saves a manual calibration."
+      ? "Starts from an assumed " + noteName(60) + ". Moving either slider sets this sample's natural note and turns on Follow MIDI note."
       : neutralReference
-        ? "No sample root is set. Follow MIDI note uses an internal " + pitchReference(root) +
-          " reference; moving a tuning control replaces it with a manual calibration."
-      : noteName(60) + " sample correction: " + pitchAdjustment(referenceCorrection) +
-        ". Inferred natural note: " + pitchReference(root) + "." +
+        ? "No natural note is set. Moving a slider here sets one manually."
+      : "Natural note: " + pitchReference(root) + ". Moving these sliders adjusts it directly." +
         (savedDetuneCents
           ? " Saved legacy track detune: " + pitchAdjustment(savedDetuneCents / 100) + "."
           : "");
@@ -4963,8 +4973,7 @@
         "Detected " + pitchReference(detected) + " with " + confidence + "% confidence." + caution;
     } else if (entry.root_source === "neutral") {
       el("channelPitchAnalysis").textContent =
-        "Not analyzed. Follow MIDI note uses an assumed " + noteName(NEUTRAL_ROOT_MIDI) +
-        " reference." + caution;
+        "Not analyzed. Playing a MIDI note plays this sample unchanged until you set a natural note." + caution;
     } else {
       el("channelPitchAnalysis").textContent = "Not analyzed yet." + caution;
     }
@@ -5105,6 +5114,7 @@
     closeInspector();
     closeNotifications();
     closeNoteInspector();
+    if (SELECTED_PART !== channel.key) { stopSamplePreview(); }
     SELECTED_PART = channel.key;
     CHANNEL_INSPECTOR_OPEN = true;
     el("channelInspector").hidden = false;
@@ -5115,6 +5125,7 @@
 
   function closeChannelInspector() {
     stopPitchReferenceTone();
+    stopSamplePreview();
     CHANNEL_INSPECTOR_OPEN = false;
     el("channelInspector").hidden = true;
     if (hasSong()) { patchTracks(); }
@@ -5424,6 +5435,110 @@
     else { playPitchReferenceTone(); }
   }
 
+  function syncSamplePreviewButtons() {
+    var rawButton = el("channelPlaySample");
+    var pitchedButton = el("channelPlaySamplePitched");
+    if (rawButton) {
+      rawButton.textContent = SAMPLE_PREVIEW_MODE === "raw" ? "Stop raw sample" : "Play raw sample";
+    }
+    if (pitchedButton) {
+      pitchedButton.textContent = SAMPLE_PREVIEW_MODE === "pitched"
+        ? "Stop sample at C4"
+        : "Play sample at C4";
+    }
+  }
+
+  function stopSamplePreview() {
+    SAMPLE_PREVIEW_TOKEN += 1;
+    var source = SAMPLE_PREVIEW_SOURCE;
+    SAMPLE_PREVIEW_SOURCE = null;
+    SAMPLE_PREVIEW_MODE = null;
+    if (source) {
+      try { source.stop(); } catch (_error) { /* already ended */ }
+    }
+    syncSamplePreviewButtons();
+  }
+
+  // Two ways to compare this sample against the C4 reference tone by ear.
+  // "raw" plays it unmodified, for finding the natural note from scratch by
+  // judging the interval. "pitched" resamples it using the currently typed
+  // natural note, so a correct guess sounds like a plain unison against the
+  // reference tone -- audible as matching or beating even without any ear
+  // training, unlike judging an arbitrary interval.
+  function playSamplePreview(mode) {
+    stopSamplePreview();
+    var channel = partByKey(SELECTED_PART);
+    var saved = partEntry(channel);
+    if (!channel || !saved.sound) { return; }
+    var playbackRate = 1;
+    if (mode === "pitched") {
+      var root = saved.root_midi === null || saved.root_midi === undefined
+        ? null : Number(saved.root_midi);
+      if (root === null || !isFinite(root) || saved.root_source === "neutral") {
+        toast("Type a natural note first -- this plays the sample retuned to match it against C4.", "warn");
+        return;
+      }
+      playbackRate = Math.pow(2, (60 - root) / 12);
+    }
+    var soundName = saved.sound;
+    var token = SAMPLE_PREVIEW_TOKEN;
+    var context;
+    try { context = ensureAudioContext(); } catch (error) { fail(error); return; }
+    var cached = SAMPLE_PREVIEW_BUFFERS[soundName];
+    var rawButton = el("channelPlaySample");
+    var pitchedButton = el("channelPlaySamplePitched");
+    var promise;
+    if (cached) {
+      promise = Promise.resolve(cached);
+    } else if (!api()) {
+      promise = Promise.reject(new Error("The audio bridge is not available"));
+    } else {
+      promise = fetchSoundBuffer(context, soundName).then(function (buffer) {
+        SAMPLE_PREVIEW_BUFFERS[soundName] = buffer;
+        return buffer;
+      });
+    }
+    if (rawButton) { rawButton.disabled = true; }
+    if (pitchedButton) { pitchedButton.disabled = true; }
+    promise.then(function (buffer) {
+      if (token !== SAMPLE_PREVIEW_TOKEN || !CHANNEL_INSPECTOR_OPEN) { return; }
+      return context.resume().then(function () {
+        if (token !== SAMPLE_PREVIEW_TOKEN || !CHANNEL_INSPECTOR_OPEN) { return; }
+        var source = context.createBufferSource();
+        var gain = context.createGain();
+        source.buffer = buffer;
+        source.playbackRate.value = playbackRate;
+        source.loop = true;
+        gain.gain.value = 0.5;
+        source.connect(gain);
+        gain.connect(AUDIO.master);
+        SAMPLE_PREVIEW_SOURCE = source;
+        SAMPLE_PREVIEW_MODE = mode;
+        source.onended = function () {
+          if (SAMPLE_PREVIEW_SOURCE === source) {
+            SAMPLE_PREVIEW_SOURCE = null;
+            SAMPLE_PREVIEW_MODE = null;
+            syncSamplePreviewButtons();
+          }
+        };
+        source.start();
+        syncSamplePreviewButtons();
+      });
+    }).catch(function (error) {
+      if (token === SAMPLE_PREVIEW_TOKEN) { fail(error); }
+    }).finally(function () {
+      if (token === SAMPLE_PREVIEW_TOKEN) {
+        if (rawButton) { rawButton.disabled = false; }
+        if (pitchedButton) { pitchedButton.disabled = false; }
+      }
+    });
+  }
+
+  function toggleSamplePreview(mode) {
+    if (SAMPLE_PREVIEW_MODE === mode) { stopSamplePreview(); }
+    else { playSamplePreview(mode); }
+  }
+
   function updateSelectedRoot(raw) {
     var channel = partByKey(SELECTED_PART);
     if (!channel) { return; }
@@ -5479,6 +5594,8 @@
     el("channelAnalyzePitch").addEventListener("click", analyzeSelectedChannelPitch);
     el("channelClearPitch").addEventListener("click", clearSelectedChannelPitch);
     el("channelPlayReference").addEventListener("click", togglePitchReferenceTone);
+    el("channelPlaySample").addEventListener("click", function () { toggleSamplePreview("raw"); });
+    el("channelPlaySamplePitched").addEventListener("click", function () { toggleSamplePreview("pitched"); });
     el("channelRootValue").addEventListener("change", function () {
       updateSelectedRoot(this.value);
     });
@@ -5790,6 +5907,7 @@
       send(Math.round(Number(this.value) || 0));
     });
   }
+
 
   function bindChannelLimit(key, fallbackKey, ids, fallbackValue) {
     var send = debounce(function (value) {

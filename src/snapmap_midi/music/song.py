@@ -210,10 +210,28 @@ class Song:
     """
 
     version: int = SONG_VERSION
-    #: Where the song ends, in milliseconds at speed 1.0. Taken from the source
-    #: file at import. Phase 3 makes this user-editable and decouples it from
-    #: the furthest note end; nothing before then writes to it.
+    #: Where the song ends, in milliseconds at speed 1.0. Seeded at import from
+    #: the file's own grid-completed length (see `music/importer.py`), and from
+    #: then on this is the AUTHORITATIVE length -- `set_song_length` is the only
+    #: thing that changes it. Nothing recomputes it from note content on its
+    #: own: shrinking it past the last note's end does not delete or clip that
+    #: note, it only stops the note from playing (see `beyond_length` in
+    #: `music/midi.py::resolve_notes`).
     duration_ms: int = 0
+    #: The loop region the ruler's brace always shows, whether or not it is
+    #: doing anything. Seeded at import to span the whole song (see
+    #: `music/importer.py`), same as `duration_ms` -- there is no "unset"
+    #: state to fall back to, only a region that has not been dragged yet.
+    #: `Session.set_loop` is what moves either bound.
+    loop_start_ms: int = 0
+    loop_end_ms: int = 0
+    #: Whether the loop actually does anything: wraps playback at `loop_end_ms`
+    #: back to `loop_start_ms`, and gates nothing else -- `export_loop` reads
+    #: the bounds above regardless of this flag, since exporting a region is a
+    #: different question from whether the transport is currently looping it.
+    #: Off by default. `Session.set_loop_enabled` is the only thing that
+    #: changes it, and it is not undo-tracked, matching mute/solo.
+    loop_enabled: bool = False
     timing: dict = field(default_factory=dict)
     tracks: list = field(default_factory=list)
     conversion: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONVERSION))
@@ -319,6 +337,9 @@ def to_dict(song: Song) -> dict:
     return {
         "version": song.version,
         "duration_ms": song.duration_ms,
+        "loop_start_ms": song.loop_start_ms,
+        "loop_end_ms": song.loop_end_ms,
+        "loop_enabled": song.loop_enabled,
         "timing": copy.deepcopy(song.timing),
         "conversion": copy.deepcopy(song.conversion),
         "note_serial": song.note_serial,
@@ -351,6 +372,9 @@ def from_dict(payload) -> Song:
     song = Song(
         version=SONG_VERSION,
         duration_ms=int(payload.get("duration_ms") or 0),
+        loop_start_ms=int(payload.get("loop_start_ms") or 0),
+        loop_end_ms=int(payload.get("loop_end_ms") or 0),
+        loop_enabled=bool(payload.get("loop_enabled", False)),
         timing=copy.deepcopy(payload.get("timing") or {}),
         conversion=conversion,
         note_serial=int(payload.get("note_serial") or 0),
@@ -377,3 +401,44 @@ def from_dict(payload) -> Song:
             track.notes.append(Note(**raw_note))
         song.tracks.append(track)
     return song
+
+
+# ---- loop export ----
+
+
+def loop_window(song: Song, start_ms: int, end_ms: int) -> Song:
+    """A throwaway copy of `song`, windowed to `[start_ms, end_ms)` and rebased to 0.
+
+    Pure: `song` itself is never touched, which is what lets `Session.export_loop`
+    feed this straight into the ordinary compile core without disturbing the
+    song the workstation has open. Every track and every lever comes along
+    unchanged -- only note membership and timing are windowed -- so the loop
+    exports with the same instruments, mutes and tuning the full song has.
+
+    1. A note is kept only if it overlaps the window at all.
+    2. A note still sounding at either edge is clipped to it, so the export
+       never carries a fragment hanging over from outside the loop.
+    3. Every surviving note is rebased by `start_ms`, so the exported timeline
+       starts at zero the way any other song does.
+    4. The copy's own length becomes exactly the window's, and its own brace
+       spans that whole new length with looping off -- a loop exported as a
+       song is just a song, not a song with another loop nested inside it.
+    """
+    windowed = copy.deepcopy(song)
+    windowed.duration_ms = end_ms - start_ms
+    windowed.loop_start_ms = 0
+    windowed.loop_end_ms = windowed.duration_ms
+    windowed.loop_enabled = False
+    for track in windowed.tracks:
+        kept = []
+        for note in track.notes:
+            note_end = note.start_ms + note.duration_ms
+            if note.start_ms >= end_ms or note_end <= start_ms:
+                continue
+            clipped_start = max(note.start_ms, start_ms)
+            clipped_end = min(note_end, end_ms)
+            note.start_ms = clipped_start - start_ms
+            note.duration_ms = max(1, clipped_end - clipped_start)
+            kept.append(note)
+        track.notes = kept
+    return windowed

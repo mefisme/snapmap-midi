@@ -104,6 +104,15 @@ def import_tracks(mid_path, *, mid=None, existing_tracks=()) -> Import:
 
     source_notes, end_ms, _elapsed = pair_notes(mid)
     names = _track_names(mid)
+    timing = timing_module.manifest(mid)
+    # The song's own default length: the later of where the file's last event
+    # actually falls and the grid-completed measure that draws the ruler --
+    # matching what the workstation showed as "the song's length" before that
+    # was a stored, editable fact rather than a number recomputed on every
+    # frame. Nothing recomputes this again after import; `Song.duration_ms`
+    # is authoritative the moment the song exists (see `music/song.py`).
+    grid_ms = int(round(timing.get("grid_duration_ms") or 0))
+    duration_ms = max(end_ms, grid_ms)
 
     by_part: dict = {}
     for source in source_notes:
@@ -139,7 +148,7 @@ def import_tracks(mid_path, *, mid=None, existing_tracks=()) -> Import:
                 ),
             )
         )
-    return Import(tracks=tracks, timing=timing_module.manifest(mid), duration_ms=end_ms)
+    return Import(tracks=tracks, timing=timing, duration_ms=duration_ms)
 
 
 def _note_from_source(source, note_id: str) -> Note:
@@ -162,6 +171,12 @@ def import_song(mid_path, *, mid=None) -> Song:
     result = import_tracks(mid_path, mid=mid)
     return Song(
         duration_ms=result.duration_ms,
+        # The brace always exists, even before anyone has dragged it, so it
+        # needs a real span from the moment the song does: the whole song is
+        # the most visible, most grabbable default -- both edges start out
+        # exactly where a user reaching for the ends of the song would look.
+        loop_start_ms=0,
+        loop_end_ms=result.duration_ms,
         timing=result.timing,
         tracks=result.tracks,
     )

@@ -22,7 +22,7 @@ from snapmap_midi.compile import compile_song, compile_to_rawmap
 from snapmap_midi.music import importer
 from snapmap_midi.music.levers import compile_levers
 from snapmap_midi.music.midi import for_part
-from snapmap_midi.music.song import SONG_VERSION, SongError, from_dict, to_dict
+from snapmap_midi.music.song import SONG_VERSION, SongError, from_dict, loop_window, to_dict
 from snapmap_midi.ui.history import Command, History
 from snapmap_midi.ui.session import Session
 
@@ -126,6 +126,67 @@ def test_the_song_keeps_the_clock_and_the_length_the_file_had():
     assert song.timing["base_bpm"] == 120.0
     assert song.tempo_map[0]["tick"] == 0
     assert song.time_signature_map[0]["numerator"] == 4
+
+
+def test_the_song_gets_a_loop_spanning_its_whole_length_at_import():
+    """The brace always exists, even before anyone has dragged it -- the whole
+    song is the most visible, most grabbable default."""
+    song = importer.import_song(TINY_MIDI)
+    assert song.loop_start_ms == 0
+    assert song.loop_end_ms == song.duration_ms
+    assert song.loop_enabled is False
+
+
+# ---- exporting the loop region ----
+
+
+def test_loop_window_keeps_clips_and_rebases_notes_at_the_window_edges():
+    song = importer.import_song(TINY_MIDI)
+    windowed = loop_window(song, 400, 1100)
+
+    assert windowed is not song
+    # Pure: the song this session has open is never touched.
+    assert song.tracks[0].notes[0].start_ms == 0
+    assert song.duration_ms != 700
+
+    assert windowed.duration_ms == 700
+    assert windowed.loop_start_ms == 0
+    assert windowed.loop_end_ms == windowed.duration_ms
+    assert windowed.loop_enabled is False
+
+    notes = {note.id: note for note in windowed.notes}
+    # 9:36:1 (1250-1375) starts at or past the window's end and is dropped
+    # entirely; the other three all overlap the window in some way.
+    assert set(notes) == {"0:60:1", "1:67:1", "1:48:1"}
+    # 0:60:1 (0-500) is still sounding when the window opens: clipped to the
+    # start and rebased to 0.
+    assert (notes["0:60:1"].start_ms, notes["0:60:1"].duration_ms) == (0, 100)
+    # 1:67:1 (500-1000) sits entirely inside the window: rebased, not clipped.
+    assert (notes["1:67:1"].start_ms, notes["1:67:1"].duration_ms) == (100, 500)
+    # 1:48:1 (1000-1250) is still sounding when the window closes: clipped to
+    # the end.
+    assert (notes["1:48:1"].start_ms, notes["1:48:1"].duration_ms) == (600, 100)
+
+
+def test_loop_window_carries_every_track_lever_unchanged():
+    song = project.open_midi(TINY_MIDI, _busy_document())
+    windowed = loop_window(song, 0, 300)
+    before = {track.key: track.family for track in song.tracks}
+    after = {track.key: track.family for track in windowed.tracks}
+    assert after == before
+    assert windowed.conversion == song.conversion
+
+
+def test_the_loop_fields_round_trip_through_the_project_file(tmp_path):
+    song = importer.import_song(TINY_MIDI)
+    song.loop_start_ms, song.loop_end_ms, song.loop_enabled = 200, 900, True
+    path = project.save(song, tmp_path / "song.smsong.json")
+    reopened = project.load(path)
+    assert (reopened.loop_start_ms, reopened.loop_end_ms, reopened.loop_enabled) == (
+        200,
+        900,
+        True,
+    )
 
 
 def test_a_muted_or_unplayable_note_is_still_written_into_the_song(tmp_path):

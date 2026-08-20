@@ -189,9 +189,7 @@ class Bridge:
             # this person's kit, not about this song. It rides in the redraw
             # payload anyway, because the rows that show a key's sound have to
             # say which of the two tables it came from.
-            "drum_defaults": {
-                str(key): sound for key, sound in gm.user_drum_table().items()
-            },
+            "drum_defaults": {str(key): sound for key, sound in gm.user_drum_table().items()},
             "settings": self._session.settings(),
             "analysis": analysis,
             "rulers": self._session.rulers(),
@@ -890,6 +888,49 @@ class Bridge:
             payload = {"ok": True}
             payload.update(self._state())
             return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    # ---- song length and loop ----
+
+    def set_song_length(self, duration_ms) -> dict:
+        """Change how long the song is, without touching any note."""
+        try:
+            self._session.set_song_length(duration_ms)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def set_loop(self, start_ms, end_ms) -> dict:
+        """Move the loop brace to a new region."""
+        try:
+            self._session.set_loop(start_ms, end_ms)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def set_loop_enabled(self, enabled) -> dict:
+        """Turn the transport's "Loop playback" wrap on or off."""
+        try:
+            self._session.set_loop_enabled(enabled)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def export_loop(self) -> dict:
+        """Write just the loop region as its own map."""
+        try:
+            self._reconcile_for_compile()
+            result = self._session.export_loop()
+            result["ok"] = True
+            result.update(self._save_sidecar())
+            return result
         except Exception as exc:
             return _fail(exc)
 

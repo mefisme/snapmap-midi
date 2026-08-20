@@ -42,6 +42,7 @@ from snapmap_midi.compile import (
     installed_event_is_looping,
 )
 from snapmap_midi.music import analysis, pipeline
+from snapmap_midi.music import song as song_module
 from snapmap_midi.music import timing as timing_module
 from snapmap_midi.music.levers import compile_levers
 from snapmap_midi.music.midi import for_part
@@ -189,9 +190,7 @@ class Session:
         """
         if self._song is None:
             return {}
-        return timing_module.at_speed(
-            self._song.timing, self._doc["tuning"]["playback_speed"]
-        )
+        return timing_module.at_speed(self._song.timing, self._doc["tuning"]["playback_speed"])
 
     def load(self, midi_path) -> dict:
         """Open a song, forgetting the last one's instruments and keeping the setup.
@@ -330,26 +329,47 @@ class Session:
             )
         return number
 
+    def _fit_length(self, new_end_ms: int) -> tuple:
+        """Grow the song to cover a note end, never shrink it. Returns `(before, after)`.
+
+        The song used to have no stored length at all -- it was recomputed
+        live from the furthest note every time, so dragging a note past the
+        edge just worked, the visible song grew to fit. `Song.duration_ms`
+        being authoritative now must not regress that: a note dragged or
+        resized past the current length still has to stay audible and
+        undimmed, so the length grows to cover it automatically. Only growth
+        is automatic -- shrinking is `set_song_length`'s alone to do, which is
+        why this never returns a value smaller than what is already stored.
+        """
+        before = self._song.duration_ms
+        return before, max(before, new_end_ms)
+
     def move_note(self, track_id, note_id, start_ms, pitch) -> None:
         """Move a note to a new start time and written pitch.
 
         Both move together because that is what a body-drag on the roll IS --
         the roll never asks for one without the other -- and one undo step
         should put both back rather than leaving a half-dragged note one
-        Ctrl+Z away from where it actually started.
+        Ctrl+Z away from where it actually started. The song's own length
+        grows with it if the note now reaches past the end (see `_fit_length`);
+        the growth rides in the same undo step so Ctrl+Z restores both.
         """
         with self._lock:
+            song = self._song
             track, note = self._track_and_note(track_id, note_id)
             start_ms = self._require_ms(start_ms, "start_ms", minimum=0)
             pitch = self._require_midi_value(pitch, "pitch")
             before = (note.start_ms, note.pitch)
             after = (start_ms, pitch)
+            duration_before, duration_after = self._fit_length(start_ms + note.duration_ms)
 
             def _apply():
                 note.start_ms, note.pitch = after
+                song.duration_ms = duration_after
 
             def _revert():
                 note.start_ms, note.pitch = before
+                song.duration_ms = duration_before
 
             _apply()
             self.push_command("Move note", revert=_revert, apply=_apply)
@@ -390,22 +410,29 @@ class Session:
         Duration alone: dragging a note's right edge never moves its start, so
         this asks for exactly the one number that gesture produces. Duration
         does not move a note's pitch or its position in a channel's pitch
-        histogram, so unlike `move_note` and `delete_note` this does not
-        re-derive the analysis.
+        histogram, so unlike `move_note` and `delete_note` this used not to
+        re-derive the analysis -- it does now, because stretching a note past
+        the song's own length can grow that length (see `_fit_length`), and
+        `duration_s` in the analysis is read straight off it.
         """
         with self._lock:
+            song = self._song
             track, note = self._track_and_note(track_id, note_id)
             duration_ms = self._require_ms(duration_ms, "duration_ms", minimum=1)
             before = note.duration_ms
+            duration_before, duration_after = self._fit_length(note.start_ms + duration_ms)
 
             def _apply():
                 note.duration_ms = duration_ms
+                song.duration_ms = duration_after
 
             def _revert():
                 note.duration_ms = before
+                song.duration_ms = duration_before
 
             _apply()
             self.push_command("Resize note", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
 
     def delete_note(self, track_id, note_id) -> None:
         """Remove a note from its track, and remember exactly where it sat.
@@ -455,6 +482,119 @@ class Session:
 
             _apply()
             self.push_command("Change note velocity", revert=_revert, apply=_apply)
+
+    # ---- song length and loop ----
+
+    def set_song_length(self, duration_ms) -> None:
+        """Change how long the song is. Never deletes or clips a note.
+
+        A note past the new length simply stops playing and exporting -- the
+        same exclusion a mute already produces (see `beyond_length` in
+        `music/midi.py::resolve_notes`) -- and starts playing again the moment
+        the length grows back past it. Shrinking is therefore free to undo:
+        nothing here ever touches `Track.notes`.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            duration_ms = self._require_ms(duration_ms, "duration_ms", minimum=1)
+            before = song.duration_ms
+
+            def _apply():
+                song.duration_ms = duration_ms
+
+            def _revert():
+                song.duration_ms = before
+
+            _apply()
+            self.push_command("Set song length", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def set_loop(self, start_ms, end_ms) -> None:
+        """Move the loop brace to a new region, both edges at once.
+
+        One undo entry for the pair, the same reason `move_note` sets `start`
+        and `pitch` together: a body-drag on the brace, or a single
+        edge-drag, is one gesture, and Ctrl+Z should put the WHOLE thing back
+        rather than leaving one edge one step behind the other.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            start_ms = self._require_ms(start_ms, "start_ms", minimum=0)
+            end_ms = self._require_ms(end_ms, "end_ms", minimum=1)
+            if start_ms >= end_ms:
+                raise ValueError("loop start_ms %r is not before end_ms %r" % (start_ms, end_ms))
+            if end_ms > song.duration_ms:
+                raise ValueError(
+                    "loop end_ms %r is past the song's length of %d ms" % (end_ms, song.duration_ms)
+                )
+            before = (song.loop_start_ms, song.loop_end_ms)
+            after = (start_ms, end_ms)
+
+            def _apply():
+                song.loop_start_ms, song.loop_end_ms = after
+
+            def _revert():
+                song.loop_start_ms, song.loop_end_ms = before
+
+            _apply()
+            self.push_command("Move loop", revert=_revert, apply=_apply)
+
+    def set_loop_enabled(self, enabled) -> None:
+        """Turn the transport's "Loop playback" wrap on or off.
+
+        Not undo-tracked, the same as mute and solo: it is a playback switch,
+        not an edit to the song, and Ctrl+Z after toggling it should undo
+        whatever note edit came before, not silently flip it back.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled has to be true or false")
+            self._song.loop_enabled = enabled
+
+    def export_loop(self) -> dict:
+        """Write just the loop region as its own map, and say where it went.
+
+        A pure windowing transform (`music/song.py::loop_window`) runs on a
+        throwaway copy of the song first, so this never disturbs the song the
+        workstation has open -- the same reason `compile`/`export` above are
+        safe to call from a running window. `export()`'s file-write and
+        `replaced` bookkeeping is repeated rather than shared with a flag,
+        because the two now compile two different songs and reusing one
+        method for both would mean threading a second `Song` through
+        `compile()`'s own signature for a single caller.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            if song.loop_start_ms >= song.loop_end_ms:
+                raise ValueError(
+                    "the loop region is empty (start_ms %r is not before end_ms %r)"
+                    % (song.loop_start_ms, song.loop_end_ms)
+                )
+            windowed = song_module.loop_window(song, song.loop_start_ms, song.loop_end_ms)
+            raw, stats = compile_song(
+                windowed,
+                self._baseline_bytes(),
+                levers=compile_levers(windowed),
+                note_index=self._note_index,
+            )
+            destination = paths.rawmap_destination(self._doc["out_dir"])
+            replaced = destination.exists()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw)
+            return {
+                "destination": str(destination),
+                "advice": _advice(destination),
+                "replaced": replaced,
+                "stats": self._report(stats),
+            }
 
     # ---- the document ----
 
@@ -534,9 +674,7 @@ class Session:
         around whichever of them happens to be written first.
         """
         with self._lock:
-            self._history.push(
-                Command(label=label, apply=apply or (lambda: None), revert=revert)
-            )
+            self._history.push(Command(label=label, apply=apply or (lambda: None), revert=revert))
 
     def undo(self) -> dict:
         """Take back the last change, and say what is left to take back."""
@@ -770,10 +908,7 @@ class Session:
                     # like a stolen voice. Looping notes already use `end` as
                     # their release point in the preview scheduler.
                     "cut": bool(getattr(note, "preview_cut", False))
-                    or bool(
-                        getattr(note, "sustain_limited", False)
-                        and not note.sustained
-                    ),
+                    or bool(getattr(note, "sustain_limited", False) and not note.sustained),
                     # Which limit silenced this note, or None if none did. The
                     # roll draws it dimmed either way; the panel needs to know
                     # whose fault it was to report each lever separately.
@@ -783,6 +918,12 @@ class Session:
                     "muted": bool(note.muted),
                     "solo_excluded": bool(note.solo_excluded),
                     "out_of_key_range": bool(getattr(note, "out_of_key_range", False)),
+                    # A note whose start falls at or past the song's own
+                    # length (see `Song.duration_ms`). Folded into `audible`
+                    # the same way muting is, so the roll dims it through the
+                    # same path a muted note already uses -- nothing new to
+                    # draw, only a new reason a note can be excluded.
+                    "beyond_length": bool(getattr(note, "beyond_length", False)),
                     "converted": bool(converted),
                     "pitch_follow": note.pitch_follow,
                     "root_pitch": note.profile_root_pitch,
@@ -853,13 +994,15 @@ class Session:
                 for note in sorted(notes, key=_event_order)
             ]
             timing = self._current_timing()
-            duration_ms = int(round(timing["grid_duration_ms"]))
-            # Both boundaries, so the surface never shrinks under a tuning lever:
-            # `midi_end` is what the roll draws, `end` is what playback reaches.
-            if display_events:
-                duration_ms = max(duration_ms, max(e["midi_end"] for e in display_events))
-            if events:
-                duration_ms = max(duration_ms, max(event["end"] for event in events))
+            speed = self._doc["tuning"]["playback_speed"]
+            # `Song.duration_ms` is authoritative as of Phase 3 -- this used to
+            # be recomputed here from grid length and the furthest note every
+            # single call, which is exactly the "silently snaps back" behaviour
+            # `set_song_length` exists to end. The song's own clock is at speed
+            # 1.0, like every other value the window reads off it; dividing by
+            # speed is what keeps this number on the same clock as `events`
+            # and `timing`, which `source_notes` already scaled the same way.
+            duration_ms = int(round(self._song.duration_ms / speed))
             manifest = {
                 "duration_ms": duration_ms,
                 "source_duration_ms": int(round(timing["source_duration_ms"])),
@@ -869,6 +1012,13 @@ class Session:
                 "release_s": levers["release_s"],
                 "hard_stop": levers["hard_stop"],
                 "timing": timing,
+                # The ruler's brace, on the same clock as `duration_ms` above.
+                # Always a real span -- see `Song.loop_start_ms`'s own
+                # docstring -- and independent of whether it currently does
+                # anything (`loop_enabled` is that switch).
+                "loop_start_ms": int(round(self._song.loop_start_ms / speed)),
+                "loop_end_ms": int(round(self._song.loop_end_ms / speed)),
+                "loop_enabled": bool(self._song.loop_enabled),
             }
             if not with_stats:
                 return manifest
@@ -886,13 +1036,10 @@ class Session:
                     "sustained": len(prepared.sustained),
                     "voices": prepared.voice_count,
                     "shared_one_shots": len(prepared.shared_decaying),
-                    "expressive_notes": len(prepared.sustained)
-                    + len(prepared.expressive_decaying),
+                    "expressive_notes": len(prepared.sustained) + len(prepared.expressive_decaying),
                     "expressive_one_shots": len(prepared.expressive_decaying),
                     "expressive_voices": prepared.voice_count,
-                    "long_sustains": sum(
-                        note.duration > 1000 for note in prepared.sustained
-                    ),
+                    "long_sustains": sum(note.duration > 1000 for note in prepared.sustained),
                     "peak_voices": prepared.voice_count,
                     "max_speakers": levers["max_speakers"],
                 }
@@ -1246,7 +1393,6 @@ class Session:
                     "for editing: the editor serializes one entity into a fixed buffer of about "
                     "%s and gives up past it. Automatic timeline sharding is currently disabled; "
                     "shorten the arrangement or reduce exported events if editor access is "
-                    "required."
-                    % (_kb(size), _kb(budget))
+                    "required." % (_kb(size), _kb(budget))
                 )
         return warnings

@@ -375,6 +375,95 @@ def test_short_final_note_gets_grid_room_without_changing_its_duration(tmp_path)
     assert [(event["start"], event["end"]) for event in manifest["events"]] == [(3500, 3625)]
 
 
+# ---- song length and loop (Phase 3) ----
+
+
+def test_song_length_is_authoritative_once_set():
+    """`set_song_length` freezes the value; nothing recomputes it from note
+    content or grid length again until it is explicitly changed."""
+    session = Session(midi=TINY_MIDI)
+    grown = session.preview_manifest()["duration_ms"]
+    session.set_song_length(500)
+    manifest = session.preview_manifest()
+    assert manifest["duration_ms"] == 500
+    # Calling preview_manifest again does not silently snap back to the old,
+    # live-recomputed value.
+    assert session.preview_manifest()["duration_ms"] == 500
+    assert manifest["duration_ms"] != grown
+
+
+def test_notes_past_the_song_length_are_dimmed_and_excluded_not_deleted():
+    session = Session(midi=TINY_MIDI)
+    before_notes = sum(len(t.notes) for t in session.song().tracks)
+    session.set_song_length(600)
+    manifest = session.preview_manifest()
+    after_notes = sum(len(t.notes) for t in session.song().tracks)
+    assert after_notes == before_notes  # non-destructive: nothing was deleted
+
+    beyond = [e for e in manifest["display_events"] if e["start"] >= 600]
+    assert beyond
+    for event in beyond:
+        assert event["beyond_length"] is True
+        assert event["audible"] is False
+    assert all(event["start"] < 600 for event in manifest["events"])
+
+
+def test_set_song_length_refuses_zero_and_negative():
+    session = Session(midi=TINY_MIDI)
+    with pytest.raises(ValueError, match="millisecond"):
+        session.set_song_length(0)
+
+
+def test_set_song_length_can_be_undone_and_redone():
+    session = Session(midi=TINY_MIDI)
+    original = session.preview_manifest()["duration_ms"]
+    session.set_song_length(500)
+    assert session.undo()["undone"] == "Set song length"
+    assert session.preview_manifest()["duration_ms"] == original
+    assert session.redo()["redone"] == "Set song length"
+    assert session.preview_manifest()["duration_ms"] == 500
+
+
+def test_the_loop_brace_reports_through_the_preview_manifest():
+    session = Session(midi=TINY_MIDI)
+    manifest = session.preview_manifest()
+    assert manifest["loop_start_ms"] == 0
+    assert manifest["loop_end_ms"] == manifest["duration_ms"]
+    assert manifest["loop_enabled"] is False
+
+    session.set_loop(200, 900)
+    session.set_loop_enabled(True)
+    manifest = session.preview_manifest()
+    assert (manifest["loop_start_ms"], manifest["loop_end_ms"]) == (200, 900)
+    assert manifest["loop_enabled"] is True
+
+
+def test_moving_a_note_past_the_song_length_grows_it_but_never_shrinks_it():
+    session = Session(midi=TINY_MIDI)
+    song = session.song()
+    track = song.tracks[0]
+    note = track.notes[0]
+    session.set_song_length(5000)
+    session.move_note(track.id, note.id, 6000, note.pitch)
+    assert session.song().duration_ms == 6000 + note.duration_ms
+
+    session.undo()
+    assert session.song().duration_ms == 5000
+
+
+def test_resizing_a_note_past_the_song_length_grows_it_but_never_shrinks_it():
+    session = Session(midi=TINY_MIDI)
+    song = session.song()
+    track = song.tracks[0]
+    note = track.notes[0]
+    session.set_song_length(5000)
+    session.resize_note(track.id, note.id, 7000)
+    assert session.song().duration_ms == note.start_ms + 7000
+
+    session.undo()
+    assert session.song().duration_ms == 5000
+
+
 def test_preview_manifest_uses_an_exact_channel_sound_without_losing_note_positions():
     session = Session(midi=TINY_MIDI)
     sound = palette.sounds_in_category("amb_air")[0]
@@ -1026,9 +1115,7 @@ def test_global_polyphony_counts_shared_and_isolated_notes_together(tmp_path, mo
     session = Session(midi=path)
     session.apply({"tuning": {"song_polyphony": 2}})
     session.apply({"channels": {"1": {"sound": "play_test_fixture_has_no_installed_record"}}})
-    by_pitch = {
-        event["pitch"]: event for event in session.preview_manifest()["display_events"]
-    }
+    by_pitch = {event["pitch"]: event for event in session.preview_manifest()["display_events"]}
 
     # E4 is a neutral automatic-piano one-shot on the shared path. G4 is a
     # sustained string on an isolated emitter. The one song-wide budget sees
@@ -1734,9 +1821,7 @@ def test_a_note_held_past_a_second_is_the_warning_the_engine_limit_justifies(tmp
     assert not any("sustained notes hold" in w for w in _warnings(session))
 
 
-def test_a_multi_recording_event_warns_hardest_when_the_track_is_pitched(
-    tmp_path, monkeypatch
-):
+def test_a_multi_recording_event_warns_hardest_when_the_track_is_pitched(tmp_path, monkeypatch):
     """One DOOM event name can be several distinct recordings, and the engine
     plays a different one per trigger (proven live -- doom-re
     `docs/truth/engine/snapmap-timeline-sound-modifiers.md`). Nothing in a map

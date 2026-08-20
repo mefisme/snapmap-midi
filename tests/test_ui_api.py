@@ -1156,6 +1156,136 @@ def test_a_note_edit_before_a_song_is_open_says_so():
     assert "song" in result["error"]
 
 
+# ---- song length and loop ----
+
+
+def test_setting_song_length_changes_it_and_is_authoritative():
+    bridge = Bridge(midi=TINY_MIDI)
+    original = bridge.preview_manifest()["preview"]["duration_ms"]
+    result = bridge.set_song_length(500)
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == 500
+    assert result["preview"]["duration_ms"] != original
+    # Not recomputed on the next call -- it is authoritative now.
+    assert bridge.preview_manifest()["preview"]["duration_ms"] == 500
+
+
+def test_setting_a_non_positive_song_length_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.set_song_length(0)
+    assert result["ok"] is False
+    assert "millisecond" in result["error"]
+
+
+def test_setting_song_length_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    original = bridge.preview_manifest()["preview"]["duration_ms"]
+    bridge.set_song_length(500)
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Set song length"
+    assert undone["preview"]["duration_ms"] == original
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Set song length"
+    assert redone["preview"]["duration_ms"] == 500
+
+
+def test_song_length_before_a_song_is_open_says_so():
+    result = Bridge().set_song_length(500)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_setting_the_loop_moves_both_edges_together():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.set_loop(200, 900)
+    assert result["ok"] is True
+    assert (result["preview"]["loop_start_ms"], result["preview"]["loop_end_ms"]) == (200, 900)
+
+
+def test_a_loop_that_starts_after_it_ends_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.set_loop(900, 200)
+    assert result["ok"] is False
+    assert "before" in result["error"]
+
+
+def test_a_loop_past_the_song_length_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    duration = bridge.preview_manifest()["preview"]["duration_ms"]
+    result = bridge.set_loop(0, duration + 5000)
+    assert result["ok"] is False
+    assert "length" in result["error"]
+
+
+def test_setting_the_loop_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    before = bridge.preview_manifest()["preview"]
+    original = (before["loop_start_ms"], before["loop_end_ms"])
+    bridge.set_loop(200, 900)
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Move loop"
+    assert (undone["preview"]["loop_start_ms"], undone["preview"]["loop_end_ms"]) == original
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Move loop"
+    assert (redone["preview"]["loop_start_ms"], redone["preview"]["loop_end_ms"]) == (200, 900)
+
+
+def test_loop_before_a_song_is_open_says_so():
+    result = Bridge().set_loop(0, 500)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_toggling_loop_playback_is_not_tracked_by_undo():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.set_loop_enabled(True)
+    assert result["ok"] is True
+    assert result["preview"]["loop_enabled"] is True
+    # A playback switch, not an edit: nothing was pushed onto the undo stack.
+    undone = bridge.undo()
+    assert undone["history"]["undone"] is None
+    assert bridge.preview_manifest()["preview"]["loop_enabled"] is True
+
+
+def test_loop_enabled_has_to_be_a_boolean():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.set_loop_enabled("yes")
+    assert result["ok"] is False
+
+
+def test_loop_enabled_before_a_song_is_open_says_so():
+    result = Bridge().set_loop_enabled(True)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_export_loop_writes_just_the_loop_region(tmp_path):
+    bridge = _bridge(tmp_path)
+    bridge.set_loop(0, 900)
+    result = bridge.export_loop()
+    assert result["ok"] is True
+    destination = Path(result["destination"])
+    assert destination == (tmp_path / "out" / paths.RAWMAP_NAME).resolve()
+    assert destination.read_bytes()
+    assert result["stats"]["notes"]
+
+    full = bridge.export()
+    # The loop is a strict prefix of the song here, so it carries fewer notes.
+    assert result["stats"]["notes"] < full["stats"]["notes"]
+
+
+def test_export_loop_before_a_song_is_open_says_so_and_writes_nothing(tmp_path):
+    bridge = Bridge()
+    bridge.apply_settings({"out_dir": str(tmp_path / "out")})
+    result = bridge.export_loop()
+    assert result["ok"] is False
+    assert not (tmp_path / "out").exists()
+
+
 # ---- settings ----
 
 

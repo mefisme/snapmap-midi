@@ -214,8 +214,7 @@ def pair_notes(mid, speed: float = 1.0):
                     # they were written for. It is derived HERE and never
                     # again: once a song exists, an id is a name rather than a
                     # position, which is what survives an insertion.
-                    id="%d:%d:%d"
-                    % (msg.channel, msg.note, occurrences[(msg.channel, msg.note)]),
+                    id="%d:%d:%d" % (msg.channel, msg.note, occurrences[(msg.channel, msg.note)]),
                 )
             )
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
@@ -400,6 +399,7 @@ def resolve_notes(
     drums_on: bool = False,
     note_ranges=None,
     duration_s: float = 0.0,
+    song_duration_ms: Optional[float] = None,
     drum_defaults=None,
     family_overrides=None,
     decaying_families=None,
@@ -441,6 +441,16 @@ def resolve_notes(
     set `include_silent` to retain those notes for a dimmed piano-roll display,
     while preview audio and map export use only notes whose `audible` metadata
     is true.
+
+    `song_duration_ms` is the song's own editable length (`Song.duration_ms`),
+    already on whatever clock `source_notes` themselves are -- the caller
+    divides by playback speed before this ever sees it, the same as every
+    other millisecond value in this function. A note starting at or past it is
+    silenced the same way a mute silences one: never deleted, never clipped,
+    just excluded from what plays and exported -- so shrinking a song's length
+    is exactly as reversible as un-muting a channel. `None` (the default, and
+    what every caller outside the workstation passes) means no such boundary
+    exists at all.
 
     `drum_key_overrides` gives a percussion key its sound by MIDI key number,
     which is the only lever that reaches the exotic keys `DRUM_MAP` drops on
@@ -507,7 +517,8 @@ def resolve_notes(
         solo_excluded = solos_in_force and not in_part(channel_solos, track_index, channel)
         key_range = for_part(part_key_range, track_index, channel, None)
         out_of_key_range = key_range is not None and not (key_range[0] <= pitch <= key_range[1])
-        audible = not muted and not solo_excluded and not out_of_key_range
+        beyond_length = song_duration_ms is not None and source.start >= song_duration_ms
+        audible = not muted and not solo_excluded and not out_of_key_range and not beyond_length
         if not audible and not include_silent:
             continue
         override = note_overrides.get(note_id, {})
@@ -667,6 +678,7 @@ def resolve_notes(
                 "muted": muted,
                 "solo_excluded": solo_excluded,
                 "out_of_key_range": out_of_key_range,
+                "beyond_length": beyond_length,
             }
             note = Note(source.start, source.end, shader, sustained, channel, family)
             notes.append(_record(annotate(note, expression, **metadata)))

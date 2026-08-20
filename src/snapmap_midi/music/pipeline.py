@@ -108,6 +108,14 @@ def resolve(
         sources,
         drums_on=drums_on,
         duration_s=round(song.duration_ms / 1000.0 / speed, 2),
+        # Same clock the sources above were just put on: a note starting past
+        # the song's own length is excluded from playback and export exactly
+        # like a mute, never deleted or clipped (see `resolve_notes`'s own
+        # docstring). `0` is treated as "no length recorded yet" rather than
+        # "silence everything" -- only a hand-built `Song` nothing has ever
+        # imported into can carry it, and it must resolve exactly as before
+        # this existed.
+        song_duration_ms=(song.duration_ms / speed) if song.duration_ms else None,
         drum_defaults=drum_defaults,
         note_index=note_index,
         include_silent=include_silent,

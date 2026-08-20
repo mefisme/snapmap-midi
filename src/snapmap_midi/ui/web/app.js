@@ -3356,8 +3356,12 @@
 
     // A faint reminder of where the loop sits behind whatever else is drawn
     // on top of it, secondary to the brace itself -- see drawLoopBrace, the
-    // strip a person actually grabs to move or resize it.
-    if (hasSong()) {
+    // strip a person actually grabs to move or resize it. Only while the
+    // loop is actually on: the brace (always visible, grayed when off)
+    // already shows an inactive region exists, so painting this reminder in
+    // the accent color while off would read as "something is active" when
+    // nothing is.
+    if (hasSong() && loopEnabledState()) {
       var loopBounds = effectiveLoopBounds();
       var loopScrollLeft = el('pianoRollViewport').scrollLeft;
       var loopStartX = contentXAtTime(loopBounds.start) - loopScrollLeft;
@@ -3366,7 +3370,7 @@
       var tintRight = Math.min(width, loopEndX);
       if (tintRight > tintLeft) {
         context.save();
-        context.globalAlpha = loopEnabledState() ? 0.07 : 0.035;
+        context.globalAlpha = 0.07;
         context.fillStyle = palette.accent;
         context.fillRect(tintLeft, 0, tintRight - tintLeft, height);
         context.restore();

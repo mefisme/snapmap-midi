@@ -103,6 +103,10 @@
   // null when no row is being renamed. Separate from SELECTED_PART: renaming
   // is a transient text-entry state, not a settings-panel focus.
   var RENAMING_TRACK_KEY = null;
+  // The part key of a track row whose "more actions" (rename/reopen/delete)
+  // popup is open, or null. At most one open at a time, the same rule the
+  // menu bar's own OPEN_MENU follows.
+  var OPEN_TRACK_MENU_KEY = null;
   var DRAW_FRAME = null;
   var LANE_DRAW_FRAME = null;
   var SEEK_DRAG = null;
@@ -514,6 +518,7 @@
     }
     document.addEventListener('pointerdown', function (event) {
       if (OPEN_MENU && !event.target.closest('.menu')) { closeMenus(); }
+      if (OPEN_TRACK_MENU_KEY && !event.target.closest('.track-more-wrap')) { closeTrackMenu(); }
     });
   }
 
@@ -830,6 +835,7 @@
       if (ROLL_PART === channel.key) { closeDetailedRoll(); }
       if (SELECTED_PART === channel.key) { closeChannelInspectorAndClearSelection(); }
       if (RENAMING_TRACK_KEY === channel.key) { RENAMING_TRACK_KEY = null; }
+      if (OPEN_TRACK_MENU_KEY === channel.key) { OPEN_TRACK_MENU_KEY = null; }
       adopt(response, sequence);
       render();
     }, function (error) { setBusy(false); fail(error); render(); });
@@ -861,6 +867,21 @@
 
   function trackRow(partKey) {
     return el("trackList").querySelector('.track-row[data-part="' + partKey + '"]');
+  }
+
+  // The row's "more actions" popup (rename/reopen/delete) -- see the comment
+  // where it is built in `buildTracks`. Closing it is idempotent so every
+  // caller (an outside click, Escape, picking an item, deleting the row's
+  // own track) can call it without first checking whether one is open.
+  function closeTrackMenu() {
+    if (!OPEN_TRACK_MENU_KEY) { return; }
+    OPEN_TRACK_MENU_KEY = null;
+    patchTracks();
+  }
+
+  function toggleTrackMenu(partKey) {
+    OPEN_TRACK_MENU_KEY = OPEN_TRACK_MENU_KEY === partKey ? null : partKey;
+    patchTracks();
   }
 
   // A pencil button in each row's actions opens an inline text field in
@@ -1022,35 +1043,59 @@
       });
       actions.appendChild(settingsButton);
 
-      var renameButton = document.createElement("button");
-      renameButton.type = "button";
-      renameButton.className = "track-toggle track-rename-button";
-      renameButton.title = "Rename track";
-      renameButton.setAttribute("aria-label", "Rename " + partLabel(channel));
-      renameButton.appendChild(iconElement("pencil"));
-      renameButton.addEventListener("click", function () { beginTrackRename(channel.key); });
-      actions.appendChild(renameButton);
+      // Rename, reopen-from-source and delete used to be three more icons
+      // crammed into `actions` beside mute/solo/settings -- six buttons in a
+      // 314px sidebar row. They are all occasional-or-rarer actions (delete
+      // is actively better off a stray click away), so they collapse into
+      // one "more actions" popup instead, the same visual language as the
+      // menu bar's own dropdowns (`.menu-popup`) but anchored to this row's
+      // own button rather than the menu bar.
+      var moreWrap = document.createElement("div");
+      moreWrap.className = "track-more-wrap";
 
+      var moreButton = document.createElement("button");
+      moreButton.type = "button";
+      moreButton.className = "track-toggle track-more-button";
+      moreButton.title = "More track actions";
+      moreButton.setAttribute("aria-haspopup", "menu");
+      moreButton.setAttribute("aria-expanded", "false");
+      moreButton.setAttribute("aria-label", "More actions for " + partLabel(channel));
+      moreButton.appendChild(iconElement("ellipsis-vertical"));
+      moreButton.addEventListener("click", function () { toggleTrackMenu(channel.key); });
+      moreWrap.appendChild(moreButton);
+
+      var morePopup = document.createElement("div");
+      morePopup.className = "menu-popup track-more-popup";
+      morePopup.setAttribute("role", "menu");
+      morePopup.hidden = true;
+
+      function moreItem(label, iconName, itemClass, handler) {
+        var item = document.createElement("button");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        if (itemClass) { item.className = itemClass; }
+        item.appendChild(iconElement(iconName));
+        var itemLabel = document.createElement("span");
+        itemLabel.textContent = label;
+        item.appendChild(itemLabel);
+        item.addEventListener("click", function () {
+          closeTrackMenu();
+          handler();
+        });
+        morePopup.appendChild(item);
+        return item;
+      }
+
+      moreItem("Rename track", "pencil", "", function () { beginTrackRename(channel.key); });
       // Only a track with a source file has anything to reopen -- a
       // hand-drawn track has no `.mid` behind it at all.
-      var reopenButton = document.createElement("button");
-      reopenButton.type = "button";
-      reopenButton.className = "track-toggle track-reopen-button";
-      reopenButton.title = "Reopen from source";
-      reopenButton.setAttribute("aria-label", "Reopen " + partLabel(channel) + " from its source file");
-      reopenButton.appendChild(iconElement("folder-open"));
-      reopenButton.hidden = !channel.source_midi;
-      reopenButton.addEventListener("click", function () { reopenTrackFromSource(channel); });
-      actions.appendChild(reopenButton);
+      moreItem("Reopen from source", "folder-open", "track-reopen-item", function () {
+        reopenTrackFromSource(channel);
+      }).hidden = !channel.source_midi;
+      moreItem("Delete track", "trash", "track-delete-item", function () { deleteTrack(channel); });
 
-      var deleteButton = document.createElement("button");
-      deleteButton.type = "button";
-      deleteButton.className = "track-toggle track-delete-button";
-      deleteButton.title = "Delete track";
-      deleteButton.setAttribute("aria-label", "Delete " + partLabel(channel));
-      deleteButton.appendChild(iconElement("trash"));
-      deleteButton.addEventListener("click", function () { deleteTrack(channel); });
-      actions.appendChild(deleteButton);
+      moreWrap.appendChild(morePopup);
+      actions.appendChild(moreWrap);
 
       heading.appendChild(actions);
       row.appendChild(heading);
@@ -1150,8 +1195,16 @@
       }
       if (nameLabel) { nameLabel.hidden = renaming; }
       if (nameInput) { nameInput.hidden = !renaming; }
-      var reopenButton = row.querySelector(".track-reopen-button");
-      if (reopenButton && channel) { reopenButton.hidden = !channel.source_midi; }
+      var menuOpen = OPEN_TRACK_MENU_KEY === partKey;
+      var moreButton = row.querySelector(".track-more-button");
+      var morePopup = row.querySelector(".track-more-popup");
+      if (moreButton) {
+        moreButton.classList.toggle("active", menuOpen);
+        moreButton.setAttribute("aria-expanded", menuOpen ? "true" : "false");
+      }
+      if (morePopup) { morePopup.hidden = !menuOpen; }
+      var reopenItem = row.querySelector(".track-reopen-item");
+      if (reopenItem && channel) { reopenItem.hidden = !channel.source_midi; }
     }
   }
 
@@ -7876,6 +7929,7 @@
     if (event.key === 'Escape') {
       if (SOUND_BROWSER.open) { event.preventDefault(); closeSoundBrowser(); }
       else if (OPEN_MENU) { closeMenus(); }
+      else if (OPEN_TRACK_MENU_KEY) { closeTrackMenu(); }
       else if (ROLL_PART || ROLL_GLOBAL) { event.preventDefault(); closeDetailedRoll(); }
       else if (NOTIFICATIONS_OPEN) { closeNotifications(); }
       else if (NOTE_INSPECTOR_OPEN) { closeNoteInspector(); }

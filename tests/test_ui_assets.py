@@ -260,6 +260,7 @@ def test_the_interface_ships_only_its_curated_lucide_icon_subset():
         "chevron-right",
         "circle-alert",
         "copy",
+        "ellipsis-vertical",
         "folder",
         "folder-open",
         "headphones",
@@ -690,7 +691,11 @@ def test_every_track_has_an_explicit_settings_action_in_both_roll_modes():
 def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
     """Phase 4: "+ Track" in the tracks pane header, and per-row rename,
     delete, and reopen-from-source actions alongside the existing mute/solo/
-    settings buttons."""
+    settings buttons. Rename/reopen/delete collapse into one "more actions"
+    popup (a `.track-more-button` kebab opening a `.track-more-popup` menu)
+    rather than three more inline icons -- with mute, solo and settings
+    already there, six icons was too cramped for a 314px sidebar row, and
+    delete is better off a stray click away regardless."""
     assert 'id="addTrackBtn"' in _HTML
     assert "function createTrack()" in _JS
     assert "api().create_track('').then(" in _JS
@@ -700,9 +705,17 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
 
     assert "function deleteTrack(channel)" in _JS
     assert "api().delete_track(channel.track_id).then(" in _JS
-    assert 'renameButton.className = "track-toggle track-rename-button";' in _JS
-    assert 'deleteButton.className = "track-toggle track-delete-button";' in _JS
-    assert 'reopenButton.className = "track-toggle track-reopen-button";' in _JS
+    assert 'moreButton.className = "track-toggle track-more-button";' in _JS
+    assert 'morePopup.className = "menu-popup track-more-popup";' in _JS
+    assert "function toggleTrackMenu(partKey)" in _JS
+    assert "function closeTrackMenu()" in _JS
+    assert "moreItem(\"Rename track\", \"pencil\"," in _JS
+    assert 'moreItem("Reopen from source", "folder-open", "track-reopen-item",' in _JS
+    assert 'moreItem("Delete track", "trash", "track-delete-item",' in _JS
+    # At most one row's popup open at a time, closed on an outside click and
+    # on Escape -- the same rules the menu bar's own OPEN_MENU follows.
+    assert "if (OPEN_TRACK_MENU_KEY && !event.target.closest('.track-more-wrap'))" in _JS
+    assert "else if (OPEN_TRACK_MENU_KEY) { closeTrackMenu(); }" in _JS
 
     assert "function beginTrackRename(partKey)" in _JS
     assert "function endTrackRename(commit)" in _JS
@@ -713,7 +726,7 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
     assert "function reopenTrackFromSource(channel)" in _JS
     assert "api().reopen_track(channel.track_id).then(" in _JS
     # Only a track with a source file has anything to reopen.
-    assert "reopenButton.hidden = !channel.source_midi;" in _JS
+    assert "if (reopenItem && channel) { reopenItem.hidden = !channel.source_midi; }" in _JS
 
 
 def test_a_double_click_on_the_roll_draws_or_deletes_a_note():

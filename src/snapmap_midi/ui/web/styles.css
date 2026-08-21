@@ -170,6 +170,12 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .track-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .track-toggle.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .track-mute-toggle.active { background: color-mix(in srgb, var(--sqErr) 14%, transparent); color: var(--sqErr); }
+.track-more-wrap { position: relative; display: flex; }
+.track-more-popup { left: auto; right: 0; top: 24px; min-width: 190px; }
+.track-more-popup button { justify-content: flex-start; gap: 8px; cursor: pointer; }
+.track-more-popup .ui-icon { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.track-more-popup button.track-delete-item:hover,
+.track-more-popup button.track-delete-item:focus-visible { color: var(--sqErr); }
 .track-settings-button { opacity: .62; }
 .track-row:hover .track-settings-button, .track-settings-button:focus-visible { opacity: 1; }
 

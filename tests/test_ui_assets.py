@@ -728,7 +728,7 @@ def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
     assert "selectNote(hit.record.id);" in fn
     assert "deleteSelectedNote();" in fn
     assert "if (!ROLL_PART || ROLL_GLOBAL) { return; }" in fn
-    assert "snappedTimeMs(positionFromClientX(event.clientX));" in fn
+    assert "floorSnappedTimeMs(positionFromClientX(event.clientX));" in fn
     assert "pitchFromClientY(event.clientY);" in fn
     assert "createNoteAt(channel.track_id, pitch, startMs, gridCellDurationMs());" in fn
     assert "function gridCellDurationMs()" in _JS

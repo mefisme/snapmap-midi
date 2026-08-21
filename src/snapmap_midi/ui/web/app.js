@@ -2918,6 +2918,21 @@
     return Math.max(0, timeAtTick(snappedTick));
   }
 
+  // Snaps DOWN to the start of whichever grid box `rawMs` falls inside,
+  // rather than to the nearest grid LINE the way `snappedTimeMs` does (right
+  // for dragging an existing note near a boundary, wrong for drawing a new
+  // one: a double-click past the halfway point of a box would round up into
+  // the NEXT box instead of starting the note in the one actually clicked).
+  function floorSnappedTimeMs(rawMs) {
+    var timing = timingManifest();
+    var ticksPerBeat = Number(timing.ticks_per_beat) || 480;
+    var gridTicks = ticksPerBeat * 4 / Math.max(1, activeGridDenominator());
+    if (!isFinite(gridTicks) || gridTicks <= 0) { return Math.max(0, rawMs); }
+    var tick = tickAtTime(Math.max(0, Number(rawMs) || 0));
+    var flooredTick = Math.floor(tick / gridTicks) * gridTicks;
+    return Math.max(0, timeAtTick(flooredTick));
+  }
+
   // ---- the loop brace (Phase 3) ----
   //
   // The brace always exists -- see Song.loop_start_ms's own docstring -- so
@@ -4345,7 +4360,7 @@
     if (!ROLL_PART || ROLL_GLOBAL) { return; }
     var channel = partByKey(ROLL_PART);
     if (!channel || !channel.track_id) { return; }
-    var startMs = snappedTimeMs(positionFromClientX(event.clientX));
+    var startMs = floorSnappedTimeMs(positionFromClientX(event.clientX));
     var pitch = pitchFromClientY(event.clientY);
     createNoteAt(channel.track_id, pitch, startMs, gridCellDurationMs());
   }

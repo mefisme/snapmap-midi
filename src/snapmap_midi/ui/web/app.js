@@ -2242,6 +2242,11 @@
       var chosen = candidate.kind === "sound" ? candidate.value : null;
       var everySong = drumScope() === "default";
       closeSoundBrowser();
+      // Unlike the top-level picker below, this sub-flow only ever starts
+      // FROM an already-open settings panel (a drum-key row only exists
+      // while `channelInspector` is showing it -- see `openDrumKeyBrowser`),
+      // and opening the sound browser closed it to get here. Reopening it is
+      // returning to where the user already was, not a surprise redirect.
       openChannelInspector(partKey);
       if (everySong) { setDrumKeyDefault(drumKey, chosen); }
       else { setDrumKeySound(drumKey, chosen); }
@@ -2262,7 +2267,6 @@
       var patch = { channels: {} };
       patch.channels[partKey] = body;
       closeSoundBrowser();
-      openChannelInspector(partKey);
       applyPatch(patch, false);
     }
     if (candidate.kind !== "sound") {

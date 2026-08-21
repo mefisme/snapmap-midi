@@ -57,6 +57,7 @@ def _confirm_looping(monkeypatch, name=_FAKE_SUSTAINED_SOUND):
         library, "event_is_looping", lambda shader: True if shader == name else None
     )
 
+
 # Default tempo is 500ms per beat over 480 ticks, so one millisecond is 0.96
 # ticks. Spelled out because a held-note test that is quietly 30% short would
 # still pass the wrong threshold.
@@ -294,6 +295,35 @@ def test_an_unmapped_key_given_a_sound_stops_being_counted_as_dropped(tmp_path):
     notes, stats = parse_notes(mid, drums=True, drum_key_overrides={_UNMAPPED_KEY: "play_clave1"})
     assert {n.shader for n in notes} == {"play_clave1"}
     assert stats["dropped"] == 0
+
+
+def test_include_silent_keeps_an_unmapped_key_dimmed_instead_of_dropped(tmp_path):
+    """Before this, a note with nothing to play was simply never returned --
+    indistinguishable, on a piano roll built from `notes`, from a note that
+    was never written at all. That is what made switching a melodic track to
+    percussion look like it deleted the track: none of its written pitches
+    matched a mapped drum key, so every note vanished with only a warning
+    (`dropped`) to explain why. `include_silent=True` now keeps it, the same
+    way a muted note already survives -- `audible=False`, plus a `no_sound`
+    flag a muted note never carries, since the two reasons are not the same
+    and a reader needs to tell them apart. `dropped` still counts it either
+    way: unlike a mute, this was never a deliberate choice."""
+    mid = _write_midi(tmp_path, [(9, 36), (9, _UNMAPPED_KEY)])
+
+    notes, stats = parse_notes(mid, drums=True, include_silent=False)
+    assert [n.pitch for n in notes] == [36]
+    assert stats["dropped"] == 1
+
+    notes, stats = parse_notes(mid, drums=True, include_silent=True)
+    assert stats["dropped"] == 1
+    by_pitch = {n.pitch: n for n in notes}
+    assert (by_pitch[36].audible, by_pitch[36].no_sound, by_pitch[36].shader) == (
+        True,
+        False,
+        DRUM_MAP[36],
+    )
+    assert (by_pitch[_UNMAPPED_KEY].audible, by_pitch[_UNMAPPED_KEY].no_sound) == (False, True)
+    assert by_pitch[_UNMAPPED_KEY].shader == ""
 
 
 def test_the_shader_table_does_not_overwrite_a_per_key_choice(tmp_path):

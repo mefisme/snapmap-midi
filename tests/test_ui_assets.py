@@ -709,7 +709,7 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
     assert 'morePopup.className = "menu-popup track-more-popup";' in _JS
     assert "function toggleTrackMenu(partKey)" in _JS
     assert "function closeTrackMenu()" in _JS
-    assert "moreItem(\"Rename track\", \"pencil\"," in _JS
+    assert 'moreItem("Rename track", "pencil",' in _JS
     assert 'moreItem("Reopen from source", "folder-open", "track-reopen-item",' in _JS
     assert 'moreItem("Delete track", "trash", "track-delete-item",' in _JS
     # At most one row's popup open at a time, closed on an outside click and
@@ -733,8 +733,7 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
         in _JS
     )
     assert (
-        'label.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");'
-        in _JS
+        'label.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");' in _JS
     )
 
     assert "function reopenTrackFromSource(channel)" in _JS
@@ -808,6 +807,23 @@ def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
     assert (
         "api().create_note(trackId, pitch, Math.round(startMs), Math.round(durationMs), 100)" in _JS
     )
+
+
+def test_a_note_with_no_mapped_sound_stays_dimmed_and_explains_why():
+    """`no_sound` (see `music/midi.py::resolve_notes`) is a new input to the
+    same `audible` formula `out_of_key_range`/`beyond_length` already feed,
+    both where the backend computes it and where the frontend re-derives it
+    locally for a mute/solo toggle (`applyOptimisticMixPatch`) -- missing it
+    in the second place would flip a no-sound note back to looking playable
+    the instant its track was muted or soloed, until the next real server
+    round trip quietly corrected it. The note inspector also names the
+    reason plainly, matching every other clamp/limit notice already there."""
+    assert (
+        "event.audible = !event.out_of_key_range && !event.beyond_length &&\n"
+        "        !event.no_sound && !event.muted && !event.solo_excluded;"
+    ) in _JS
+    assert "if (note.no_sound) {" in _JS
+    assert "No sound is mapped to this key, so it stays silent." in _JS
 
 
 def test_new_song_and_import_into_project_are_reachable_from_the_file_menu():
@@ -1637,13 +1653,20 @@ def test_the_part_panel_can_say_a_part_is_a_kit():
     setting with no control is a setting nobody has. Percussion off channel 10
     is ordinary -- a composer who put the kit on channel 6 hears it played as a
     piano, and nothing in the window says why or offers a way out.
-    """
+
+    "Drum kit" itself no longer lives here -- see
+    `test_the_sound_browser_can_switch_a_track_to_a_drum_kit` for why -- so
+    this control only offers "Automatic" and "Melodic instrument", and shows
+    disabled with neither selected when a track already IS one (changed
+    only through the sound picker)."""
     assert 'id="channelPercussion"' in _HTML
     assert 'id="channelPercussionHelp"' in _HTML
-    for mode in ("auto", "kit", "melodic"):
+    for mode in ("auto", "melodic"):
         assert '<option value="%s">' % mode in _HTML
+    assert '<option value="kit">' not in _HTML
     assert "function syncChannelPercussion(channel)" in _JS
     assert "partPatch(channel, { percussion: this.value })" in _JS
+    assert 'select.disabled = mode === "kit";' in _JS
 
 
 def test_the_part_panel_lists_the_keys_a_kit_plays():

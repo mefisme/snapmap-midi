@@ -394,24 +394,30 @@ def test_every_sound_the_drum_table_already_uses_can_be_chosen_again():
     assert set(DRUM_MAP.values()) <= offered
 
 
-def test_the_catalog_names_only_the_drum_keys_the_open_song_plays():
-    """All 128 would be a picker whose rows are mostly keys the file never
-    touches, and the file's own keys are the ones the Drums tab is for."""
+def test_the_catalog_names_every_standard_drum_key_plus_any_the_song_plays():
+    """The full standard GM table is always available, not only the keys THIS
+    song happens to use -- a freshly drawn drum track has no notes for the
+    per-channel table to derive from at all (see `analysis.py::from_song`),
+    and "Key 36" instead of "Bass Drum 1" is a worse way to configure a kit
+    that has not been drawn onto yet. A file's own non-standard keys still
+    layer on top, so a key `DRUM_MAP` does not know still gets named."""
     catalog = Bridge(midi=TINY_MIDI).catalog()
     analysis = Bridge(midi=TINY_MIDI).startup()["analysis"]
     kit = [c for c in analysis["channels"] if c["is_drums"]][0]
-    assert set(catalog["drum_names"]) == set(kit["drum_keys"])
+    assert set(kit["drum_keys"]) <= set(catalog["drum_names"])
     assert catalog["drum_names"]["36"] == "Bass Drum 1"
 
 
 def test_opening_a_song_carries_a_fresh_catalog_with_it():
-    """`drum_names` covers the loaded file's keys and nothing else, so it is
-    stale the moment another file opens. A window that had to ask for it
-    separately would draw one frame of the new song with the old song's keys."""
+    """`drum_names` covers the full standard GM table unconditionally, so it
+    needs no song open to answer -- but it must still pick up a newly opened
+    song's own extra keys immediately, or a window that had to ask for it
+    separately would draw one frame of the new song missing them."""
     bridge = Bridge()
-    assert bridge.catalog()["drum_names"] == {}
+    assert bridge.catalog()["drum_names"]["36"] == "Bass Drum 1"
+    before = set(bridge.catalog()["drum_names"])
     payload = bridge.load_midi(TINY_MIDI)
-    assert payload["catalog"]["drum_names"]
+    assert set(payload["catalog"]["drum_names"]) >= before
     assert payload["catalog"]["families"] == bridge.catalog()["families"]
 
 
@@ -1480,6 +1486,32 @@ def test_import_midi_into_project_with_no_window_and_no_path_is_cancelled():
     bridge = Bridge(midi=TINY_MIDI)
     result = bridge.import_midi_into_project()
     assert result == {"ok": False, "cancelled": True}
+
+
+def test_a_percussion_note_with_no_mapped_sound_is_dimmed_not_dropped():
+    """Before this, a note whose written pitch had no drum sound to answer
+    with simply never appeared in the preview at all -- indistinguishable
+    from a note that was never drawn, which is what made switching a
+    melodic track to percussion look like it deleted every note on it. It
+    now survives as a real, unplayable event instead of vanishing (see
+    `music/midi.py::resolve_notes`'s own `no_sound` flag)."""
+    bridge = _new_project_bridge()
+    created = bridge.create_track("Drums")
+    track_id, track_key = created["track_id"], created["track_key"]
+    unmapped_pitch = 60
+    assert DRUM_MAP.get(unmapped_pitch) is None, "the test needs a genuinely unmapped key"
+    bridge.create_note(track_id, unmapped_pitch, 0, 480, 100)
+    result = bridge.apply_settings({"channels": {track_key: {"percussion": "kit"}}})
+    assert result["ok"] is True
+
+    note = next(e for e in result["preview"]["display_events"] if e["track_id"] == track_id)
+    assert note["audible"] is False
+    assert note["no_sound"] is True
+    assert note["sound"] == ""
+    # `events` (as opposed to `display_events`) is what actually gets
+    # scheduled to play and written to the map -- it must stay excluded
+    # from that, exactly as it always was.
+    assert all(e["track_id"] != track_id for e in result["preview"]["events"])
 
 
 # ---- song length and loop ----

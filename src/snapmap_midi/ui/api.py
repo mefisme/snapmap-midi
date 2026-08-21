@@ -236,7 +236,15 @@ class Bridge:
         ]
 
         analysis = self._session.analysis_dict()
-        drum_names = {}
+        # Named for the whole standard GM percussion table first, not only the
+        # keys some channel has actually written a note on: a track with no
+        # notes yet (freshly drawn, or every note since deleted) has nothing
+        # in its own `drum_keys` to name from, and "Key 36" instead of
+        # "Acoustic Bass Drum" is a worse way to configure a kit before
+        # anything has been drawn onto it. Per-channel keys are layered on
+        # top for the same reason `drum_keys` builds them at all: a file can
+        # use a key `DRUM_MAP` does not, and that one still needs a name.
+        drum_names = {str(key): gm_drum_name(key) for key in gm.DRUM_MAP}
         for channel in (analysis or {}).get("channels", ()):
             for key in channel["drum_keys"]:
                 drum_names[key] = gm_drum_name(int(key))

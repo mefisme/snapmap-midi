@@ -621,70 +621,90 @@ def resolve_notes(
                 family = low_family
             shader = palette.decl_for(family, sample_note, index)
             sustained = family in SUSTAINED and family not in no_sustain
-        if shader:
-            if exact_sound is None and family != "drums":
-                profile_root = palette.shader_pitch(shader)
-                if profile_root is not None:
-                    # `profile_root` stays the honest natural note of the
-                    # recording that was chosen. The root HANDED to the
-                    # expression math is offset by the transpose so the
-                    # modifier resolves against `sample_note` rather than
-                    # the written note: with a recording available at the
-                    # transposed pitch that lands on exactly 0 (nothing to
-                    # correct, shared path preserved), and where the family
-                    # has no sample there it becomes precisely the leftover
-                    # correction needed to reach the transposed pitch from
-                    # whichever neighbour `decl_for` fell back to.
-                    applied_root = float(profile_root) - auto_transpose
-                    root_confidence = 1.0
-                    root_source = "palette_name"
-                    pitch_follow = True
-            active_pitch_semitones = (
-                follow_pitch_semitones if pitch_follow else manual_pitch_semitones
-            )
-            expression = expression_for(
-                pitch,
-                source.velocity,
-                applied_root,
-                pitch_offset=pitch_offset,
-                pitch_semitones=active_pitch_semitones,
-                track_transpose=track_transpose,
-                octave_shift=octave_shift,
-                fine_tune_cents=fine_tune_cents,
-                volume_trim_db=volume_trim_db,
-                note_volume_db=note_volume_db,
-                track_volume_db=track_volume_db,
-                master_volume_db=master_volume_db,
-            )
-            metadata = {
-                "id": note_id,
-                # Which track wrote this note. Deliberately NOT part of `id`:
-                # an imported id is already unique without it, and adding it
-                # would invalidate every `note_overrides` entry in every
-                # settings sidecar already on disk.
-                "track": track_index,
-                "profile_root_pitch": profile_root,
-                "root_confidence": root_confidence,
-                "root_source": root_source,
-                "pitch_follow": pitch_follow,
-                # Glide is meaningful only when successive notes retune
-                # one recording. Automatic instruments deliberately choose
-                # separately tuned recordings and keep their shared,
-                # polyphonic emitter path instead.
-                "uses_exact_sound": exact_sound is not None,
-                "manual_pitch_semitones": manual_pitch_semitones,
-                "follow_pitch_semitones": follow_pitch_semitones,
-                "audible": audible,
-                "muted": muted,
-                "solo_excluded": solo_excluded,
-                "out_of_key_range": out_of_key_range,
-                "beyond_length": beyond_length,
-            }
-            note = Note(source.start, source.end, shader, sustained, channel, family)
-            notes.append(_record(annotate(note, expression, **metadata)))
-        else:
-            if audible:
-                dropped += 1
+        # A falsy shader means the palette -- or, for percussion, the drum
+        # table -- found nothing for this note. That is as real a reason to
+        # exclude it from what plays as a mute is, so with `include_silent`
+        # it earns the same dimmed-rather-than-dropped treatment a mute
+        # already gets, instead of vanishing from the piano roll with only a
+        # warning to explain why. Unlike a mute it is not a deliberate
+        # choice, so it still counts toward `dropped` (and the warning that
+        # reads it) regardless of `include_silent` -- only whether the note
+        # itself survives to be drawn changes. Export and preview audio pass
+        # `include_silent=False`, so what actually plays or gets written is
+        # completely unchanged by this: a shaderless note is excluded there
+        # exactly as it always was.
+        no_sound = not shader
+        if audible and no_sound:
+            dropped += 1
+        audible = audible and not no_sound
+        if no_sound:
+            if not include_silent:
+                continue
+            shader = ""
+        if exact_sound is None and family != "drums":
+            profile_root = palette.shader_pitch(shader)
+            if profile_root is not None:
+                # `profile_root` stays the honest natural note of the
+                # recording that was chosen. The root HANDED to the
+                # expression math is offset by the transpose so the
+                # modifier resolves against `sample_note` rather than
+                # the written note: with a recording available at the
+                # transposed pitch that lands on exactly 0 (nothing to
+                # correct, shared path preserved), and where the family
+                # has no sample there it becomes precisely the leftover
+                # correction needed to reach the transposed pitch from
+                # whichever neighbour `decl_for` fell back to.
+                applied_root = float(profile_root) - auto_transpose
+                root_confidence = 1.0
+                root_source = "palette_name"
+                pitch_follow = True
+        active_pitch_semitones = follow_pitch_semitones if pitch_follow else manual_pitch_semitones
+        expression = expression_for(
+            pitch,
+            source.velocity,
+            applied_root,
+            pitch_offset=pitch_offset,
+            pitch_semitones=active_pitch_semitones,
+            track_transpose=track_transpose,
+            octave_shift=octave_shift,
+            fine_tune_cents=fine_tune_cents,
+            volume_trim_db=volume_trim_db,
+            note_volume_db=note_volume_db,
+            track_volume_db=track_volume_db,
+            master_volume_db=master_volume_db,
+        )
+        metadata = {
+            "id": note_id,
+            # Which track wrote this note. Deliberately NOT part of `id`:
+            # an imported id is already unique without it, and adding it
+            # would invalidate every `note_overrides` entry in every
+            # settings sidecar already on disk.
+            "track": track_index,
+            "profile_root_pitch": profile_root,
+            "root_confidence": root_confidence,
+            "root_source": root_source,
+            "pitch_follow": pitch_follow,
+            # Glide is meaningful only when successive notes retune
+            # one recording. Automatic instruments deliberately choose
+            # separately tuned recordings and keep their shared,
+            # polyphonic emitter path instead.
+            "uses_exact_sound": exact_sound is not None,
+            "manual_pitch_semitones": manual_pitch_semitones,
+            "follow_pitch_semitones": follow_pitch_semitones,
+            "audible": audible,
+            "muted": muted,
+            "solo_excluded": solo_excluded,
+            "out_of_key_range": out_of_key_range,
+            "beyond_length": beyond_length,
+            # Distinct from every OTHER exclusion reason above: those are
+            # deliberate choices (mute, key range, song length); this is the
+            # palette or the drum table finding nothing to play at all, kept
+            # separate so a reader of this note (or the piano roll drawing
+            # it) can say WHY rather than just THAT it is silent.
+            "no_sound": no_sound,
+        }
+        note = Note(source.start, source.end, shader, sustained, channel, family)
+        notes.append(_record(annotate(note, expression, **metadata)))
 
     audible_notes = [note for note in notes if getattr(note, "audible", True)]
     pitch_limits = {}

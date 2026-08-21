@@ -684,7 +684,14 @@
 
   function drumKeyName(channel, key) {
     var names = (channel && channel.drum_names) || {};
-    return names[String(key)] || "Key " + key;
+    var name = names[String(key)];
+    if (name) { return name; }
+    // A key with no written notes yet has nothing in the per-channel table
+    // (see `analysis.py::from_song`'s own `drum_keys`) -- the catalog's own
+    // table names every standard GM percussion key regardless of whether
+    // any song currently uses it.
+    var shipped = (STATE.catalog && STATE.catalog.drum_names) || {};
+    return shipped[String(key)] || "Key " + key;
   }
 
   // Three tables answer for a key, in order. The song's own `drum_keys` wins;
@@ -708,7 +715,14 @@
   // What the analysis fell back to: already the user's table where they set
   // one, since the whole compile reads through the same overlay.
   function drumKeyDefault(channel, key) {
-    return (channel && channel.drum_keys && channel.drum_keys[String(key)]) || null;
+    var perChannel = channel && channel.drum_keys && channel.drum_keys[String(key)];
+    if (perChannel) { return perChannel; }
+    // A key with no written notes yet has nothing in the per-channel table
+    // to read -- `drumKeyChoice` already checked the song override and the
+    // user's own saved default above this call, so what is left to answer
+    // is the same shipped/builtin sound any OTHER key on this track would
+    // fall back to, regardless of whether a note has been drawn on it yet.
+    return shippedDrumMap()[String(key)] || null;
   }
 
   function drumKeyChoice(channel, key) {
@@ -5779,22 +5793,27 @@
 
   function syncChannelPercussion(channel) {
     var mode = percussionMode(channel);
-    el("channelPercussion").value = mode;
+    var select = el("channelPercussion");
     var help = el("channelPercussionHelp");
-    // Short, and true of the track in front of you. An earlier draft explained
-    // the General MIDI channel-10 convention on every row, which is a fact
-    // about one channel out of sixteen -- so fifteen rows out of sixteen were
-    // reading a sentence that did not describe them.
+    // "Drum kit" no longer lives in this control -- it only offers
+    // "Automatic" and "Melodic instrument" now. A track BECOMES a drum kit
+    // through the sound picker's "Choose an instrument" list instead (see
+    // `useSoundBrowserSelection`), which also correctly clears whatever
+    // instrument it had before, something this control's own "kit" option
+    // never did. A track that IS a kit shows here disabled, with neither of
+    // the two remaining options selected, rather than silently picking one
+    // as though it still applied.
+    select.value = mode;
+    select.disabled = mode === "kit";
     if (mode === "kit") {
-      help.textContent = "Plays this track as a drum kit \u2014 each MIDI key is "
-        + "one drum sound.";
+      help.textContent = "This track is a drum kit \u2014 pick a different "
+        + "instrument from the sound picker to change it.";
     } else if (mode === "melodic") {
       help.textContent = "Plays this track as an instrument.";
     } else if (channel.is_drums) {
       help.textContent = "Automatic: channel 10, so this plays as a drum kit.";
     } else {
-      help.textContent = "Automatic: plays as an instrument. Choose Drum kit if "
-        + "this track is really percussion.";
+      help.textContent = "Automatic: plays as an instrument.";
     }
   }
 
@@ -5858,6 +5877,17 @@
     var host = el("drumKeyList");
     host.textContent = "";
     var keys = Object.keys((channel && channel.drum_keys) || {});
+    // A freshly drawn track -- or an import with every note on it since
+    // deleted -- has no written notes for `channel.drum_keys` to come from
+    // (see `analysis.py::from_song`: it is built straight off `pitches`,
+    // which is just as empty). Falling back to nothing here would mean no
+    // drum kit could ever have a single key configured before a note was
+    // drawn onto it blind. The shipped table lists the same standard GM
+    // percussion keys regardless of what any song currently plays, so it is
+    // what a kit starts from before any of its own keys are written.
+    if (!keys.length && channel && channel.is_drums) {
+      keys = Object.keys(shippedDrumMap());
+    }
     group.hidden = !channel.is_drums || !keys.length;
     if (group.hidden) { return; }
     keys.sort(function (left, right) { return Number(left) - Number(right); });
@@ -7005,6 +7035,12 @@
       " dB; output " + signed(note.volume_db) + " dB.";
 
     var limits = [];
+    if (note.no_sound) {
+      limits.push(
+        "No sound is mapped to this key, so it stays silent. Assign one in " +
+        "track settings."
+      );
+    }
     if (note.pitch_limited) {
       limits.push(
         "Pitch requested " + pitchAdjustment(note.requested_pitch) +
@@ -7602,11 +7638,11 @@
       event.solo_excluded = soloActive && !entry.soloed;
       // `audible` came from Python computed under the OLD mix state; it has
       // to be re-derived here or a note just unmuted stays excluded by its
-      // own stale flag one line down. `out_of_key_range` and `beyond_length`
-      // are the only other inputs to Python's formula and a mix-only patch
-      // never touches either.
+      // own stale flag one line down. `out_of_key_range`, `beyond_length`
+      // and `no_sound` are the only other inputs to Python's formula and a
+      // mix-only patch never touches any of them.
       event.audible = !event.out_of_key_range && !event.beyond_length &&
-        !event.muted && !event.solo_excluded;
+        !event.no_sound && !event.muted && !event.solo_excluded;
       // `converted` is Python's answer to a harder question -- whether this
       // note also survives polyphony and voice-count thinning -- and it
       // never runs that thinning on a muted or solo-excluded note, so a note

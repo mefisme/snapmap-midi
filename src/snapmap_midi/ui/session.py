@@ -1296,6 +1296,13 @@ class Session:
                     # same path a muted note already uses -- nothing new to
                     # draw, only a new reason a note can be excluded.
                     "beyond_length": bool(getattr(note, "beyond_length", False)),
+                    # The palette (or, for percussion, the drum table) found
+                    # nothing to play this note with -- distinct from every
+                    # other reason `audible` can be false, which are all
+                    # deliberate choices (mute, key range, song length) --
+                    # so the roll can say WHY rather than just THAT it is
+                    # silent. See `music/midi.py::resolve_notes`.
+                    "no_sound": bool(getattr(note, "no_sound", False)),
                     "converted": bool(converted),
                     "pitch_follow": note.pitch_follow,
                     "root_pitch": note.profile_root_pitch,

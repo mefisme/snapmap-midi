@@ -1303,7 +1303,17 @@
         );
       }
       var label = lane.querySelector(".lane-label");
-      if (label) { label.style.left = (scrollLeft + 8) + "px"; }
+      if (label) {
+        label.style.left = (scrollLeft + 8) + "px";
+        // Rebuilt here rather than only in `buildLanesView`, for the same
+        // reason `patchTracks` rebuilds `.track-name`: a rename changes
+        // neither `channel.key` nor its program, so `trackShapeKey` never
+        // changes and `buildLanesView` never reruns -- this is the only
+        // place the new name would otherwise reach the lane at all.
+        if (channel) {
+          label.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");
+        }
+      }
     }
     var fill = container.querySelector(".lane-grid-fill");
     var fillHeight = Math.max(0, container.clientHeight - usedHeight);

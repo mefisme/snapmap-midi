@@ -722,6 +722,20 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
     assert "function commitTrackRename(channel, name)" in _JS
     assert "api().rename_track(channel.track_id, name).then(" in _JS
     assert ".track-name-input {" in _CSS
+    # A rename changes neither `channel.key` nor its program, so
+    # `trackShapeKey` never changes and neither `buildTracks` nor
+    # `buildLanesView` (which only rerun on a shape change) ever sees the new
+    # name -- `patchTracks`/`patchLanesView` (which run on every render) are
+    # the only place either label can pick it up, so both must rebuild the
+    # text themselves rather than only repositioning it.
+    assert (
+        'nameLabel.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");'
+        in _JS
+    )
+    assert (
+        'label.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");'
+        in _JS
+    )
 
     assert "function reopenTrackFromSource(channel)" in _JS
     assert "api().reopen_track(channel.track_id).then(" in _JS

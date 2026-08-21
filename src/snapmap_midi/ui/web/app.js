@@ -1500,6 +1500,12 @@
     if (entry.family) {
       return { kind: "family", value: entry.family, label: humanCategory(entry.family) };
     }
+    // Mirrors `music/midi.py::resolve_notes`'s own precedence (sound, then
+    // family, then percussion, then automatic) so the row this modal
+    // highlights as "current" never disagrees with what actually plays.
+    if (entry.percussion === "kit") {
+      return { kind: "percussion", value: "", label: "Percussion — General MIDI drum kit" };
+    }
     return {
       kind: "automatic",
       value: "",
@@ -1545,6 +1551,8 @@
       summary.appendChild(document.createTextNode("  \u00b7  " + candidate.value));
     } else if (candidate.kind === "family") {
       summary.appendChild(document.createTextNode("  \u00b7  Pitched instrument family"));
+    } else if (candidate.kind === "percussion") {
+      summary.appendChild(document.createTextNode("  \u00b7  General MIDI percussion table"));
     } else if (inDrumKeyMode()) {
       summary.appendChild(document.createTextNode("  \u00b7  General MIDI percussion table"));
     } else {
@@ -1691,26 +1699,18 @@
       SOUND_BROWSER.mode === "automatic", 0,
       function () { selectSoundMode("automatic"); }, false, false
     ));
+    // "Automatic" and this one are the whole story: automatic is "guess from
+    // the file" (the MIDI program number, or -- for percussion -- the channel
+    // and the notes themselves), and this is "I'll say so myself" for when
+    // that guess is wrong or, for a hand-drawn track, has nothing to guess
+    // FROM at all. A drum kit is exactly that same kind of override -- "this
+    // track is percussion, not whatever automatic decided" -- so it lives
+    // here as one more choice next to Piano/Strings/Brass, not as a fourth,
+    // structurally different button of its own.
     host.appendChild(soundTreeButton(
-      "Pitched instruments", "music-2", familyCount,
+      "Choose an instrument", "music-2", familyCount + 1,
       SOUND_BROWSER.mode === "families", 0,
       function () { selectSoundMode("families"); }, false, false
-    ));
-    // A drum kit is not one sound the way a family or an exact event is --
-    // it is 128 possible per-key sounds with sensible GM defaults, which is
-    // exactly what the track settings panel's drum-key list already handles
-    // (`renderDrumKeys`). So this is not a fourth "browse and confirm" mode
-    // the way the three above are: picking it is a direct action -- flip
-    // `percussion` to "kit" and hand off straight to that existing list --
-    // not a candidate this modal collects and confirms. Without this, the
-    // only way to make a track (especially a freshly drawn one, which has no
-    // notes for automatic detection to key off) play as drums was to dig
-    // into track settings, never reachable from here at all.
-    var channel = partByKey(SOUND_BROWSER.part);
-    host.appendChild(soundTreeButton(
-      "Percussion / drum kit", "music-2", null,
-      !!(channel && channel.is_drums), 0,
-      function () { chooseTrackAsPercussion(channel); }, false, false
     ));
     var divider = document.createElement("div");
     divider.className = "sound-tree-divider";
@@ -1970,8 +1970,8 @@
       }
     } else if (SOUND_BROWSER.mode === "families") {
       var families = (STATE.catalog && STATE.catalog.families) || [];
-      breadcrumb.textContent = "Pitched instruments";
-      count.textContent = families.length + (families.length === 1 ? " family" : " families");
+      breadcrumb.textContent = "Choose an instrument";
+      count.textContent = (families.length + 1) + " instruments";
       families.forEach(function (family) {
         list.appendChild(resultRow(
           "family",
@@ -1982,6 +1982,15 @@
           null
         ));
       });
+      // Not a pitched family, but the same kind of override: "this track is
+      // percussion, not whatever automatic detected" -- see the comment on
+      // this button in `renderSoundTree`. 128 possible per-key sounds, so
+      // there is nothing more specific to pick here; the actual per-key
+      // choices live in track settings, opened right after this is chosen.
+      list.appendChild(resultRow(
+        "percussion", "", "Percussion \u2014 General MIDI drum kit", "",
+        ["Each MIDI key plays its own drum sound, assigned in track settings"], null
+      ));
     } else {
       var query = el("soundBrowserSearch").value.trim();
       var events = filteredSoundEvents();
@@ -2174,7 +2183,8 @@
     SOUND_BROWSER.candidate = candidateForChannel(channel);
     SOUND_BROWSER.page = 0;
     SOUND_BROWSER.path = "";
-    SOUND_BROWSER.mode = SOUND_BROWSER.candidate.kind === "family"
+    SOUND_BROWSER.mode = SOUND_BROWSER.candidate.kind === "family" ||
+        SOUND_BROWSER.candidate.kind === "percussion"
       ? "families"
       : (SOUND_BROWSER.candidate.kind === "automatic" ? "automatic" : "events");
     el("soundBrowserSearch").value = "";
@@ -2223,20 +2233,6 @@
     el("soundBrowserOverlay").hidden = true;
   }
 
-  // "Percussion / drum kit" in the sound browser's own tree: the same patch
-  // the track settings panel's "Drum kit" dropdown option already sends
-  // (`{ percussion: "kit" }`), so nothing new has to exist on the backend
-  // for this to work. Waits for that patch to land before opening the
-  // settings panel so it opens already showing the fresh drum-key list
-  // rather than a flash of the pitched-instrument controls it is replacing.
-  function chooseTrackAsPercussion(channel) {
-    if (!channel) { return; }
-    closeSoundBrowser();
-    applyPatch(partPatch(channel, { percussion: "kit" }), true).then(function () {
-      openChannelInspector(channel.key);
-    });
-  }
-
   function useSoundBrowserSelection() {
     var candidate = SOUND_BROWSER.candidate;
     var partKey = SOUND_BROWSER.part;
@@ -2252,8 +2248,16 @@
       return;
     }
     if (!soundCandidateChanged()) { return; }
-    var body = { family: null, sound: null };
+    // `percussion` always rides along with every choice here, not only the
+    // percussion one: `channel.is_drums` (the "Percussion" suffix on a track's
+    // name, the lanes view, the settings panel) reads the raw `percussion`
+    // field directly, independent of `family`/`sound` -- so picking a pitched
+    // family or an automatic instrument after this track was once forced to
+    // "kit" has to put `percussion` back to "auto" itself, or every one of
+    // those labels would keep calling a now-melodic track percussion.
+    var body = { family: null, sound: null, percussion: "auto" };
     if (candidate.kind === "family") { body.family = candidate.value; }
+    else if (candidate.kind === "percussion") { body.percussion = "kit"; }
     function commit() {
       var patch = { channels: {} };
       patch.channels[partKey] = body;

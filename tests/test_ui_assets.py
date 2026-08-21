@@ -748,19 +748,44 @@ def test_the_sound_browser_can_switch_a_track_to_a_drum_kit():
     drawn one -- it has no notes for automatic percussion detection to key
     off) play as drums was to dig into track settings; the sound browser
     opened by "+ Track" and every track's own sound picker offered only
-    pitched families and exact sample events. A drum kit is not a fourth
-    thing this modal collects and confirms the way those are -- it is 128
-    possible per-key sounds with GM defaults, which the track settings
-    panel's drum-key list (`renderDrumKeys`) already handles -- so picking
-    it is a direct action: send the exact same `{ percussion: "kit" }` patch
-    the settings panel's own "Drum kit" dropdown option already sends, then
-    hand off straight to that existing list."""
-    assert 'host.appendChild(soundTreeButton(\n      "Percussion / drum kit"' in _JS
-    assert "function chooseTrackAsPercussion(channel)" in _JS
-    fn = _JS.split("function chooseTrackAsPercussion(channel) {", 1)[1].split("\n  }", 1)[0]
-    assert "closeSoundBrowser();" in fn
-    assert 'applyPatch(partPatch(channel, { percussion: "kit" }), true).then(' in fn
-    assert "openChannelInspector(channel.key);" in fn
+    pitched families and exact sample events.
+
+    Percussion is not a fourth "browse and confirm" MODE the way Automatic/
+    Pitched/Events are -- "Automatic MIDI mapping" is "guess from the file"
+    (program number, or channel/notes for percussion) and everything else in
+    "Choose an instrument" is "I'll say so myself" for when that guess is
+    wrong or, for a hand-drawn track, has nothing to guess from at all. So
+    percussion is one more row in that SAME override list, next to Piano/
+    Strings/Brass, selected and confirmed through the exact same
+    `useSoundBrowserSelection` path every other row already uses -- not a
+    separate one-click action button off in the tree."""
+    assert 'host.appendChild(soundTreeButton(\n      "Automatic MIDI mapping"' in _JS
+    assert 'host.appendChild(soundTreeButton(\n      "Choose an instrument"' in _JS
+    assert "familyCount + 1," in _JS
+    assert (
+        'list.appendChild(resultRow(\n        "percussion", "", "Percussion \\u2014 '
+        'General MIDI drum kit", "",' in _JS
+    )
+
+    # `candidateForChannel` mirrors the compiler's own precedence (sound,
+    # family, percussion, automatic) so the highlighted "current" row can
+    # never disagree with what actually plays.
+    assert 'if (entry.percussion === "kit") {' in _JS
+    assert 'return { kind: "percussion", value: "", label:' in _JS
+
+    # Picking ANY row here -- not only percussion -- resets `percussion` to
+    # "auto": `channel.is_drums` reads that field directly, independent of
+    # `family`/`sound`, so undoing a previous "kit" pick by choosing a
+    # pitched family has to put it back itself or every "· Percussion" label
+    # in the app would keep calling a now-melodic track percussion.
+    fn = _JS.split("function useSoundBrowserSelection() {", 1)[1]
+    fn = fn.split("\n  function initSoundBrowser()", 1)[0]
+    assert 'var body = { family: null, sound: null, percussion: "auto" };' in fn
+    assert 'if (candidate.kind === "family") { body.family = candidate.value; }' in fn
+    assert 'else if (candidate.kind === "percussion") { body.percussion = "kit"; }' in fn
+
+    # No standalone one-click action -- removed in favor of the row above.
+    assert "function chooseTrackAsPercussion" not in _JS
 
 
 def test_a_double_click_on_the_roll_draws_or_deletes_a_note():

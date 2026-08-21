@@ -267,12 +267,15 @@ def test_the_interface_ships_only_its_curated_lucide_icon_subset():
         "minus",
         "music-2",
         "pause",
+        "pencil",
         "play",
+        "plus",
         "repeat",
         "search",
         "settings",
         "square",
         "stack",
+        "trash",
         "triangle-alert",
         "volume-2",
         "volume-x",
@@ -682,6 +685,90 @@ def test_every_track_has_an_explicit_settings_action_in_both_roll_modes():
     assert ".track-settings-button { opacity: .62; }" in _CSS
     assert ".track-mute-toggle.active" in _CSS
     assert re.search(r"\.track-row\s*\{[^}]*cursor:\s*pointer", _CSS)
+
+
+def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
+    """Phase 4: "+ Track" in the tracks pane header, and per-row rename,
+    delete, and reopen-from-source actions alongside the existing mute/solo/
+    settings buttons."""
+    assert 'id="addTrackBtn"' in _HTML
+    assert "function createTrack()" in _JS
+    assert "api().create_track('').then(" in _JS
+    assert "el('addTrackBtn').addEventListener('click', createTrack);" in _JS
+    assert "if (response.track_key) { openSoundBrowser(response.track_key); }" in _JS
+    assert "el('addTrackBtn').disabled = !song;" in _JS
+
+    assert "function deleteTrack(channel)" in _JS
+    assert "api().delete_track(channel.track_id).then(" in _JS
+    assert 'renameButton.className = "track-toggle track-rename-button";' in _JS
+    assert 'deleteButton.className = "track-toggle track-delete-button";' in _JS
+    assert 'reopenButton.className = "track-toggle track-reopen-button";' in _JS
+
+    assert "function beginTrackRename(partKey)" in _JS
+    assert "function endTrackRename(commit)" in _JS
+    assert "function commitTrackRename(channel, name)" in _JS
+    assert "api().rename_track(channel.track_id, name).then(" in _JS
+    assert ".track-name-input {" in _CSS
+
+    assert "function reopenTrackFromSource(channel)" in _JS
+    assert "api().reopen_track(channel.track_id).then(" in _JS
+    # Only a track with a source file has anything to reopen.
+    assert "reopenButton.hidden = !channel.source_midi;" in _JS
+
+
+def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
+    """Reserved since Phase 2 (see the comment beside the roll's `contextmenu`
+    listener): double-click deletes a hit note the same way Delete/Backspace
+    does, and draws a new grid-snapped one on empty space -- but only while a
+    single track's roll is actually open, never the global overview."""
+    assert "canvas.addEventListener('dblclick', handlePianoRollDoubleClick);" in _JS
+    assert "function handlePianoRollDoubleClick(event)" in _JS
+    fn = _JS.split("function handlePianoRollDoubleClick(event) {", 1)[1]
+    fn = fn.split("--------------------------------- audio */", 1)[0]
+    assert "selectNote(hit.record.id);" in fn
+    assert "deleteSelectedNote();" in fn
+    assert "if (!ROLL_PART || ROLL_GLOBAL) { return; }" in fn
+    assert "snappedTimeMs(positionFromClientX(event.clientX));" in fn
+    assert "pitchFromClientY(event.clientY);" in fn
+    assert "createNoteAt(channel.track_id, pitch, startMs, gridCellDurationMs());" in fn
+    assert "function gridCellDurationMs()" in _JS
+    assert "function createNoteAt(trackId, pitch, startMs, durationMs)" in _JS
+    assert (
+        "api().create_note(trackId, pitch, Math.round(startMs), Math.round(durationMs), 100)" in _JS
+    )
+
+
+def test_new_song_and_import_into_project_are_reachable_from_the_file_menu():
+    """The two Phase 4 entry points that do not replace the whole project:
+    "New Song" (compose from nothing, no `.mid` required) and "Import MIDI
+    into Current Project..." (append another file's tracks onto what is
+    already open), alongside the pre-existing "Import MIDI..." which is
+    relabeled for clarity now that a second import exists."""
+    assert 'id="menuNewSong"' in _HTML
+    assert "Import MIDI (New Project)..." in _HTML
+    assert 'id="menuImportInto"' in _HTML
+    assert "Import MIDI into Current Project..." in _HTML
+    assert "function newProject()" in _JS
+    assert "api().new_project().then(" in _JS
+    assert "function importMidiIntoProject()" in _JS
+    assert "api().import_midi_into_project().then(" in _JS
+    assert "el('menuNewSong').addEventListener('click', newProject);" in _JS
+    assert "el('menuImportInto').addEventListener('click', importMidiIntoProject);" in _JS
+    assert "el('emptyNewSongBtn').addEventListener('click', newProject);" in _JS
+    assert 'id="emptyNewSongBtn"' in _HTML
+    assert "else if (key === 'i')" in _JS
+    assert "if (key === 'n') { event.preventDefault(); newProject(); }" in _JS
+
+
+def test_hassong_recognizes_a_blank_song_with_no_midi_path():
+    """A brand-new, drawn-from-nothing song has no `.mid` at all
+    (`STATE.settings.midi` stays empty) -- `hasSong()` must not require one,
+    or the whole workspace (piano roll, transport, track column) would act
+    as though nothing were open the moment `newProject()` succeeded."""
+    assert "function hasSong() { return !!(STATE.analysis && STATE.settings); }" in _JS
+    # The one thing that genuinely needs the .mid path checks it itself.
+    assert "el('menuReopen').disabled = !(song && STATE.settings.midi);" in _JS
+    assert "if (!api() || !hasSong() || !STATE.settings.midi) { return; }" in _JS
 
 
 def test_muting_or_soloing_a_track_clears_the_other_on_that_track():

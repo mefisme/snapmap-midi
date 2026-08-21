@@ -41,7 +41,7 @@ from snapmap_midi.compile import (
     installed_event_duration_ms,
     installed_event_is_looping,
 )
-from snapmap_midi.music import analysis, pipeline
+from snapmap_midi.music import analysis, importer, pipeline
 from snapmap_midi.music import song as song_module
 from snapmap_midi.music import timing as timing_module
 from snapmap_midi.music.levers import compile_levers
@@ -56,6 +56,46 @@ from snapmap_midi.ui.history import Command, History
 #: would sit somewhere else on the strip for a reason that has nothing to do
 #: with it.
 _AXIS = (0, 127)
+
+#: How many bars a brand-new, drawn-from-nothing song starts with. There is no
+#: file to read a length from -- `import_song` seeds `duration_ms` from the
+#: MIDI file's own grid-completed measure, and a blank song has none -- so
+#: this is a plain judgement call rather than a derived number: eight bars is
+#: enough room to start composing without immediately reaching for "Set Song
+#: Length...", and short enough that an empty roll does not read as broken.
+_NEW_SONG_BARS = 8
+_NEW_SONG_TICKS_PER_BEAT = 480
+#: MIDI's own default tempo (120 BPM, 500,000 microseconds per beat) and time
+#: signature (4/4) -- the same defaults `music/timing.py::manifest` falls
+#: back to for a file that never sets either.
+_NEW_SONG_TEMPO_US = 500_000
+
+
+def _blank_timing() -> dict:
+    """A `Song.timing` manifest for a song with no `.mid` behind it at all.
+
+    `preview_manifest` reads `timing["source_duration_ms"]` unconditionally,
+    and the ruler's own tick math (`ticksPerBar`/`timeAtTick` in `app.js`)
+    reads `ticks_per_beat` and the tempo/signature markers -- an empty `{}`
+    (what `Session._current_timing` already answers for a `None` song) would
+    make either raise or draw nothing the moment `new_song` handed out a real
+    song with nothing else populated. This is the same shape
+    `music/timing.py::manifest` builds from a file, at the same MIDI
+    defaults, for a song that has no file to build it from.
+    """
+    ticks_per_bar = _NEW_SONG_TICKS_PER_BEAT * 4
+    duration_ticks = ticks_per_bar * _NEW_SONG_BARS
+    duration_ms = round(duration_ticks * _NEW_SONG_TEMPO_US / 1000 / _NEW_SONG_TICKS_PER_BEAT, 6)
+    return {
+        "ticks_per_beat": _NEW_SONG_TICKS_PER_BEAT,
+        "duration_ticks": 0,
+        "source_duration_ms": 0.0,
+        "grid_duration_ticks": duration_ticks,
+        "grid_duration_ms": duration_ms,
+        "tempo_changes": [{"tick": 0, "time_ms": 0.0, "tempo": _NEW_SONG_TEMPO_US}],
+        "time_signatures": [{"tick": 0, "time_ms": 0.0, "numerator": 4, "denominator": 4}],
+        "base_bpm": round(60_000_000.0 / _NEW_SONG_TEMPO_US, 2),
+    }
 
 
 def _percussion_modes(doc) -> tuple:
@@ -291,6 +331,20 @@ class Session:
             raise ValueError("no note %r on track %r" % (note_id, track_id))
         return track, note
 
+    def _track_only(self, track_id):
+        """The track one structural edit names, or why it doesn't exist.
+
+        The track-only half of `_track_and_note`'s lookup, for an edit that
+        does not name an existing note: drawing a new one, deleting a track,
+        renaming it, or reopening it from its source file.
+        """
+        if self._song is None:
+            raise ValueError("no song is open -- open a MIDI file first")
+        track = self._song.track_by_id(track_id)
+        if track is None:
+            raise ValueError("no track %r in this song" % (track_id,))
+        return track
+
     @staticmethod
     def _require_midi_value(value, what: str) -> int:
         """A MIDI-range integer (0-127): a written pitch or a velocity.
@@ -482,6 +536,221 @@ class Session:
 
             _apply()
             self.push_command("Change note velocity", revert=_revert, apply=_apply)
+
+    def create_note(self, track_id, pitch, start_ms, duration_ms, velocity=100) -> None:
+        """Draw a new note onto an existing track.
+
+        Mints its id through `Song.new_note_id`, exactly like every note an
+        import creates -- a drawn note is not a different kind of note, only
+        a different way of arriving. The song's own length grows to cover it
+        if it lands past the current end, in the same undo step, the same as
+        `move_note`/`resize_note` already do for a dragged note.
+        """
+        with self._lock:
+            song = self._song
+            track = self._track_only(track_id)
+            pitch = self._require_midi_value(pitch, "pitch")
+            velocity = self._require_midi_value(velocity, "velocity")
+            start_ms = self._require_ms(start_ms, "start_ms", minimum=0)
+            duration_ms = self._require_ms(duration_ms, "duration_ms", minimum=1)
+            note = song_module.Note(
+                id=song.new_note_id(),
+                pitch=pitch,
+                velocity=velocity,
+                start_ms=start_ms,
+                duration_ms=duration_ms,
+            )
+            duration_before, duration_after = self._fit_length(start_ms + duration_ms)
+
+            def _apply():
+                if note not in track.notes:
+                    track.notes.append(note)
+                song.duration_ms = duration_after
+
+            def _revert():
+                if note in track.notes:
+                    track.notes.remove(note)
+                song.duration_ms = duration_before
+
+            _apply()
+            self.push_command("Draw note", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    # ---- tracks ----
+
+    def create_track(self, name="") -> str:
+        """Add a blank track with no notes and no MIDI provenance. Returns its id.
+
+        `source_track=-1` and `source_midi=None` are the convention `Track`'s
+        own docstring establishes for a track drawn from nothing. `channel`
+        cannot be 0 (or any other fixed value) for every hand-drawn track:
+        `Track.key` is `"%d:%d" % (source_track, channel)`, and every
+        hand-drawn track shares `source_track == -1`, so `channel` is the only
+        thing left to keep two of them from colliding in the settings
+        document that `project.to_settings` keys by that same string. Minted
+        through `Song.new_drawn_channel` rather than derived from the tracks
+        currently in the song -- see that method's own docstring for why a
+        deleted track's channel must never come back into use.
+
+        Deliberately does not set `sound`/`family`/anything else `Track`
+        carries: `project.apply_settings` calls `track.clear_levers()` and
+        re-derives every lever from the settings document on EVERY patch
+        application, for EVERY track, so a value set directly here would be
+        silently wiped the next time the user touched any unrelated control.
+        Assigning a sound is the same `openSoundBrowser` -> pick -> `apply_settings`
+        path an imported track already uses, triggered by the window right
+        after this returns -- not this method's job.
+        """
+        with self._lock:
+            song = self._song
+            if song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            if not isinstance(name, str):
+                raise ValueError("a track name has to be text")
+            track_id = song.new_track_id()
+            track = song_module.Track(
+                id=track_id,
+                name=name,
+                channel=song.new_drawn_channel(),
+                source_track=-1,
+                source_midi=None,
+                notes=[],
+            )
+
+            def _apply():
+                if track not in song.tracks:
+                    song.tracks.append(track)
+
+            def _revert():
+                if track in song.tracks:
+                    song.tracks.remove(track)
+
+            _apply()
+            self.push_command("Create track", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+            return track_id
+
+    def delete_track(self, track_id) -> None:
+        """Remove a track, and every note on it, from the song.
+
+        Undo-tracked exactly like `delete_note`: the index is captured so a
+        restored track goes back where it was rather than at the end.
+
+        A deleted track's `doc["channels"][track.key]` entry is left behind
+        in the settings document -- nothing here or in `apply_settings`
+        removes it, the same as an imported track's entry outlives that track
+        being muted or re-pointed. That is only safe because `channel` (the
+        one part of a hand-drawn track's key that can vary) is minted from
+        `Song.new_drawn_channel`, a counter that never runs backward: no
+        LATER track, hand-drawn or not, can ever be assigned the deleted
+        track's channel number again, so nothing can ever address that stale
+        entry again either. A track imported from a `.mid` cannot collide
+        this way in the first place -- its key's `source_track` half is
+        offset past every part already present at import time (see
+        `music/importer.py::import_tracks`), so two different files' tracks
+        never share a key even before this rule is considered.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            track = self._track_only(track_id)
+            index = song.tracks.index(track)
+
+            def _apply():
+                if track in song.tracks:
+                    song.tracks.remove(track)
+
+            def _revert():
+                if track not in song.tracks:
+                    song.tracks.insert(min(index, len(song.tracks)), track)
+
+            _apply()
+            self.push_command("Delete track", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def rename_track(self, track_id, name) -> None:
+        """Change a track's display name. Undo-tracked like any other edit."""
+        with self._lock:
+            track = self._track_only(track_id)
+            if not isinstance(name, str):
+                raise ValueError("a track name has to be text")
+            before = track.name
+
+            def _apply():
+                track.name = name
+
+            def _revert():
+                track.name = before
+
+            _apply()
+            self.push_command("Rename track", revert=_revert, apply=_apply)
+            # `track_name` rides in the analysis (`ChannelInfo.track_name`),
+            # not the settings document, so the row's label needs a fresh
+            # analysis the same way a note edit that changes the pitch
+            # histogram does.
+            self._analysis = self._analyze()
+
+    def reopen_track(self, track_id) -> None:
+        """Re-read one track's notes from its original file. Keeps its levers and id.
+
+        The per-track replacement for the old, whole-song "Reopen MIDI":
+        notes refresh, every lever on the track (sound, mute, transpose, ...)
+        stays exactly as the user left it. Only available on a track that
+        carries a `source_midi` -- a hand-drawn track has nothing to re-read.
+
+        Matching which part of the file is "this track" again is not as
+        simple as re-reading `track.source_track`: a fresh, standalone
+        `importer.import_tracks(track.source_midi)` call numbers parts from
+        that file's own raw indices (its internal offset is 0), which will
+        not generally equal what is stored on `track.source_track` -- that
+        value may have been offset at ORIGINAL import time to avoid colliding
+        with a different file's tracks already in this project (see
+        `import_tracks`'s `track_offset`). So this matches by POSITION within
+        the file instead: every track in this song sharing the same
+        `source_midi`, sorted by `(source_track, channel)`, is a stable
+        ordering (offsetting every one of them by the same constant at import
+        time preserves their relative order), and this track's index in that
+        ordering is the same index a fresh import of the same file produces,
+        sorted the same way. Only holds for the ordinary case -- the file's
+        track/channel structure unchanged since import. If the file has
+        genuinely changed shape since then, this may match the wrong part; a
+        wrong-but-plausible match is treated as an accepted limitation here
+        rather than a case this tries to detect or refuse.
+        """
+        with self._lock:
+            song = self._song
+            track = self._track_only(track_id)
+            if track.source_midi is None:
+                raise ValueError("%r has no source file to reopen" % (track.name or track_id))
+            same_source = sorted(
+                (t for t in song.tracks if t.source_midi == track.source_midi),
+                key=lambda t: (t.source_track, t.channel),
+            )
+            position = same_source.index(track)
+            fresh = importer.import_tracks(track.source_midi)
+            fresh_sorted = sorted(fresh.tracks, key=lambda t: (t.source_track, t.channel))
+            if position >= len(fresh_sorted):
+                raise ValueError(
+                    "%s no longer has a matching part in %s"
+                    % (track.name or track.key, track.source_midi)
+                )
+            new_notes = fresh_sorted[position].notes
+            before = track.notes
+            new_end = max((n.start_ms + n.duration_ms for n in new_notes), default=0)
+            duration_before, duration_after = self._fit_length(new_end)
+
+            def _apply():
+                track.notes = new_notes
+                song.duration_ms = duration_after
+
+            def _revert():
+                track.notes = before
+                song.duration_ms = duration_before
+
+            _apply()
+            self.push_command("Reopen from source", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
 
     # ---- song length and loop ----
 
@@ -731,6 +1000,77 @@ class Session:
     def history_state(self) -> dict:
         with self._lock:
             return self._history.state()
+
+    # ---- starting or growing a project ----
+
+    def new_song(self) -> dict:
+        """Start a blank song: no tracks, no `.mid`, nothing chosen about it yet.
+
+        The entry point that makes composing from nothing reachable at all --
+        every other way into this session starts from a `.mid`. Seeded the
+        same way `import_song` seeds an imported one (`music/importer.py`):
+        the loop brace spans the whole song and `duration_ms` is a real,
+        positive number, both from `_blank_timing`'s made-up-but-honest
+        manifest rather than the `{}` `Session._current_timing` already
+        answers for "no song at all" -- `preview_manifest` reads
+        `timing["source_duration_ms"]` unconditionally, so a truly empty
+        manifest would fail the first redraw of a new song rather than
+        showing one.
+        """
+        with self._lock:
+            timing = _blank_timing()
+            duration_ms = max(1, int(round(timing["grid_duration_ms"])))
+            song = song_module.Song(
+                duration_ms=duration_ms,
+                loop_start_ms=0,
+                loop_end_ms=duration_ms,
+                timing=timing,
+                tracks=[],
+            )
+            self._doc = settings_module.defaults()
+            self._adopt(song)
+            return analysis.as_dict(self._analysis)
+
+    def import_midi_into_project(self, mid_path) -> dict:
+        """Add another `.mid` to the OPEN project, as further tracks beside what
+        is already there -- rather than replacing it, which is what `load` does.
+
+        `music.importer.add_midi` is already exactly this operation (composable
+        by design since Phase 1: fresh, collision-free track/note ids, offsets
+        clear of every part already present). It mutates `song.tracks`,
+        `song.duration_ms` and `song.timing` in place and hands back the
+        `Track` objects it added, which is what undo needs to know to take
+        only them back out again.
+
+        `project.apply_settings(self._song, self._doc)` afterward is safe to
+        call on the whole song, not just the new tracks: every EXISTING
+        track's entry is already keyed in `self._doc["channels"]` by its own
+        `Track.key`, so re-running the projection on them reproduces the
+        exact values they already had -- this is the same call `Session.apply`
+        already makes on every settings patch, for every track, every time.
+        The newly added tracks have no entry yet, so they come back with
+        every lever cleared (`Track.clear_levers`), same as `create_track`.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            added = importer.add_midi(song, mid_path)
+            project.apply_settings(song, self._doc)
+
+            def _apply():
+                for track in added:
+                    if track not in song.tracks:
+                        song.tracks.append(track)
+
+            def _revert():
+                for track in added:
+                    if track in song.tracks:
+                        song.tracks.remove(track)
+
+            self.push_command("Import MIDI", revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+            return analysis.as_dict(self._analysis)
 
     # ---- the project file ----
 

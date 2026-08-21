@@ -891,6 +891,102 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    def create_note(self, track_id, pitch, start_ms, duration_ms, velocity=100) -> dict:
+        """Draw a new note onto an existing track."""
+        try:
+            self._session.create_note(track_id, pitch, start_ms, duration_ms, velocity)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    # ---- tracks ----
+
+    def create_track(self, name="") -> dict:
+        """Add a blank track, and say which one so the window can open its
+        sound picker next -- the same `openSoundBrowser` flow an imported
+        track already uses, triggered by the window right after this answers.
+        """
+        try:
+            track_id = self._session.create_track(name or "")
+            song = self._session.song()
+            track = song.track_by_id(track_id) if song is not None else None
+            payload = {
+                "ok": True,
+                "track_id": track_id,
+                "track_key": track.key if track is not None else None,
+            }
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def delete_track(self, track_id) -> dict:
+        """Remove a track and every note on it."""
+        try:
+            self._session.delete_track(track_id)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def rename_track(self, track_id, name) -> dict:
+        """Change a track's display name."""
+        try:
+            self._session.rename_track(track_id, name)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def reopen_track(self, track_id) -> dict:
+        """Re-read one track's notes from its original file."""
+        try:
+            self._session.reopen_track(track_id)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    # ---- starting or growing a project ----
+
+    def new_project(self) -> dict:
+        """Start a blank song: no tracks, no `.mid` -- what makes composing
+        from nothing reachable without ever having imported a file.
+        """
+        try:
+            self._session.new_song()
+            self._error = None
+            payload = {"ok": True}
+            payload.update(self._state())
+            payload["catalog"] = self._catalog()
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def import_midi_into_project(self, path=None) -> dict:
+        """Add another `.mid` to the OPEN project as further tracks, rather
+        than replacing it -- the second import entry point, alongside
+        `pick_midi`/`load_midi` which start a brand-new project instead.
+        Mirrors `pick_midi`'s own file-picker structure.
+        """
+        try:
+            if path is None:
+                path = self._open_dialog(_MIDI_TYPES)
+                if path is None:
+                    return _cancelled()
+            self._session.import_midi_into_project(path)
+            payload = {"ok": True}
+            payload.update(self._state())
+            payload["catalog"] = self._catalog()
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     # ---- song length and loop ----
 
     def set_song_length(self, duration_ms) -> dict:

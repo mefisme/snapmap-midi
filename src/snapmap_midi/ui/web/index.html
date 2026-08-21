@@ -34,6 +34,9 @@
   <symbol id="icon-wave-sine" viewBox="0 0 24 24"><path d="M2 12c1.5-6 3.5-6 5-3s3.5 9 5 6 3.5-9 5-6 3.5 3 5 3"></path></symbol>
   <symbol id="icon-stack" viewBox="0 0 24 24"><path d="m12 2 8 5-8 5-8-5z"></path><path d="m4 12 8 5 8-5"></path><path d="m4 17 8 5 8-5"></path></symbol>
   <symbol id="icon-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"></path><path d="M3 11v-1a4 4 0 0 1 4-4h14"></path><path d="m7 22-4-4 4-4"></path><path d="M21 13v1a4 4 0 0 1-4 4H3"></path></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol>
+  <symbol id="icon-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.986L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .622.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path><path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></symbol>
 </svg>
 <!-- Track rows and category controls are built from the Python payload. The
      fixed markup is the one-screen workstation shell: desktop menus, global
@@ -53,7 +56,9 @@
       <div class="menu">
         <button type="button" class="menu-label" data-menu="file" aria-haspopup="menu" aria-expanded="false">File</button>
         <div class="menu-popup" id="menu-file" role="menu" hidden>
-          <button type="button" id="menuImport" role="menuitem"><span>Import MIDI...</span><kbd>Ctrl+I</kbd></button>
+          <button type="button" id="menuNewSong" role="menuitem"><span>New Song</span><kbd>Ctrl+N</kbd></button>
+          <button type="button" id="menuImport" role="menuitem"><span>Import MIDI (New Project)...</span><kbd>Ctrl+I</kbd></button>
+          <button type="button" id="menuImportInto" role="menuitem" disabled><span>Import MIDI into Current Project...</span></button>
           <button type="button" id="menuReopen" role="menuitem" disabled><span>Reopen MIDI</span><kbd>Ctrl+R</kbd></button>
           <div class="menu-separator"></div>
           <button type="button" id="menuOpenProject" role="menuitem"><span>Open Project...</span><kbd>Ctrl+O</kbd></button>
@@ -120,7 +125,10 @@
     <div class="empty-card">
       <div class="empty-title">Open a MIDI file to begin.</div>
       <div class="muted">The song will be converted and shown here without changing the original file.</div>
-      <button type="button" class="btn primary" id="emptyOpenBtn">Import MIDI...</button>
+      <div class="empty-actions">
+        <button type="button" class="btn primary" id="emptyOpenBtn">Import MIDI...</button>
+        <button type="button" class="btn" id="emptyNewSongBtn">New Song</button>
+      </div>
     </div>
   </div>
 
@@ -134,7 +142,13 @@
 
   <main class="workspace" id="workspace" hidden>
     <section class="tracks-pane" id="tracksPane" aria-label="Song tracks">
-      <div class="pane-head"><span>Tracks</span><span class="badge" id="trackCount">0</span></div>
+      <div class="pane-head">
+        <span>Tracks</span><span class="badge" id="trackCount">0</span>
+        <button type="button" class="track-toggle pane-head-action" id="addTrackBtn"
+          title="Add a new blank track" aria-label="Add a new blank track" disabled>
+          <svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg>
+        </button>
+      </div>
       <div class="track-list" id="trackList"></div>
     </section>
     <div class="pane-splitter" id="paneSplitter" role="separator" tabindex="0"

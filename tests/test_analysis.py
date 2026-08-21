@@ -377,6 +377,8 @@ def test_as_dict_survives_the_trip_through_json(tmp_path):
                 "key",
                 "track",
                 "track_name",
+                "track_id",
+                "source_midi",
                 "channel",
                 "program",
                 "program_name",

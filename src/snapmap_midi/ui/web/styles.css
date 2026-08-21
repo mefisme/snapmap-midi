@@ -133,6 +133,7 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .empty-state { flex: 1; display: grid; place-items: center; min-height: 0; padding: 24px; }
 .empty-card { width: min(460px, 90%); display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 26px; background: var(--panel); border: 1px solid var(--border); box-shadow: 0 5px 22px rgba(0,0,0,.08); text-align: center; }
 .empty-title { font-size: 14px; font-weight: 600; }
+.empty-actions { display: flex; gap: 8px; }
 .midi-loading-state:not([hidden]) { flex: 1; min-height: 0; display: grid; place-items: center; padding: 24px; background: var(--field); }
 .midi-loading-card { width: min(460px, 90%); display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 30px 26px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 5px 22px rgba(0,0,0,.08); text-align: center; }
 .midi-loading-spinner { width: 30px; height: 30px; box-sizing: border-box; border: 3px solid color-mix(in srgb, var(--accent) 20%, var(--border)); border-top-color: var(--accent); border-radius: 50%; animation: midi-loading-spin .8s linear infinite; }
@@ -143,6 +144,7 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .workspace { --tracks-width: 314px; flex: 1; min-height: 0; display: flex; margin: 7px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
 .tracks-pane { width: var(--tracks-width); min-width: 0; max-width: none; flex: 0 0 var(--tracks-width); display: flex; flex-direction: column; background: var(--panel); }
 .pane-head { height: 31px; flex-shrink: 0; display: flex; align-items: center; gap: 7px; padding: 0 9px; background: var(--panel2); border-bottom: 1px solid var(--border); font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.pane-head-action { margin-left: auto; }
 .badge { background: var(--sel); color: var(--selText); border-radius: 10px; padding: 1px 7px; font-size: 10px; }
 .track-list { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 .track-row { display: grid; grid-template-columns: 27px minmax(0,1fr); grid-template-rows: 20px 27px; gap: 5px 8px; align-items: center; min-height: 59px; padding: 6px 7px 7px 6px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background-color .12s ease; }
@@ -155,6 +157,7 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .track-channel { grid-column: 1; grid-row: 1 / span 2; align-self: stretch; display: flex; align-items: center; justify-content: center; color: var(--track-color); font: 600 11px Consolas, monospace; border-right: 2px solid color-mix(in srgb, var(--track-color) 88%, transparent); }
 .track-heading { grid-column: 2; grid-row: 1; min-width: 0; display: flex; align-items: center; gap: 5px; }
 .track-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+.track-name-input { flex: 1; min-width: 0; height: 20px; padding: 0 4px; border: 1px solid var(--accent); border-radius: 3px; background: var(--field); color: var(--text); font: inherit; font-weight: 600; }
 .track-meta { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 10px; }
 .track-sound-picker { grid-column: 2; grid-row: 2; width: 100%; min-width: 0; height: 27px; display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 4px 7px; border: 1px solid var(--border2); border-radius: 5px; background: var(--field); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .track-sound-picker:hover, .track-sound-picker:focus-visible { border-color: var(--accent); }

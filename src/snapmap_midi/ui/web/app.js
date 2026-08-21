@@ -99,6 +99,10 @@
   var CHANNEL_INSPECTOR_OPEN = false;
   var NOTE_INSPECTOR_OPEN = false;
   var SELECTED_NOTE_ID = null;
+  // The part key of a track row currently showing its inline rename field, or
+  // null when no row is being renamed. Separate from SELECTED_PART: renaming
+  // is a transient text-entry state, not a settings-panel focus.
+  var RENAMING_TRACK_KEY = null;
   var DRAW_FRAME = null;
   var LANE_DRAW_FRAME = null;
   var SEEK_DRAG = null;
@@ -192,7 +196,17 @@
   function el(id) { return document.getElementById(id); }
   function api() { return window.pywebview && window.pywebview.api; }
   function nextRequest() { REQUEST += 1; return REQUEST; }
-  function hasSong() { return !!(STATE.analysis && STATE.settings && STATE.settings.midi); }
+  // A song is open the moment `STATE.analysis` exists -- true for an import
+  // AND for a brand-new, drawn-from-nothing song, which has no `.mid` at all
+  // (`STATE.settings.midi` stays empty for one of those). Requiring
+  // `settings.midi` here used to be harmless because nothing before Phase 4
+  // could ever open a song without one; `newProject()` is the first thing
+  // that can, and gating the whole workspace on a path that legitimately
+  // does not exist would leave a blank song's piano roll, transport and
+  // track column all acting as though nothing were open. Anything that
+  // specifically needs the `.mid` path itself -- `reopenMidi`, `menuReopen`
+  // -- checks `STATE.settings.midi` on its own instead.
+  function hasSong() { return !!(STATE.analysis && STATE.settings); }
   function channels() { return (STATE.analysis && STATE.analysis.channels) || []; }
   function previewEvents() { return (STATE.preview && STATE.preview.events) || []; }
   function playbackPreview() { return AUDIO.performance || STATE.preview || {}; }
@@ -507,9 +521,13 @@
     var song = hasSong();
     var audio = STATE.audio || {};
     [
-      'menuReopen', 'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart',
-      'menuSongLength', 'menuExportLoop'
+      'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart',
+      'menuSongLength', 'menuExportLoop', 'menuImportInto'
     ].forEach(function (id) { el(id).disabled = !song; });
+    // Reopening the .mid needs the .mid: a song open with no source file
+    // (drawn from nothing, or opened as a project with only hand-drawn
+    // tracks) has nothing for this to re-read.
+    el('menuReopen').disabled = !(song && STATE.settings.midi);
     el('menuPlay').querySelector('span').textContent = AUDIO.playing ? 'Pause' : 'Play';
     if (audio.source === 'game' || audio.source === 'game+cache') {
       el('menuAudio').querySelector('span').textContent = 'DOOM Audio Ready';
@@ -591,6 +609,15 @@
   function partLabel(part) {
     if (!part) { return ""; }
     return part.track_name || part.program_name;
+  }
+
+  // A track's written pitch range as text, or a plain "no notes yet" for one
+  // that has none -- a freshly drawn track, or an import with every note
+  // since deleted. `channel.lowest`/`.highest` are `None` (JSON `null`) in
+  // that case rather than a number `noteName` could misread as a real pitch.
+  function channelRangeText(channel) {
+    if (channel.lowest === null || channel.lowest === undefined) { return "no notes yet"; }
+    return noteName(channel.lowest) + "–" + noteName(channel.highest);
   }
 
   function humanSoundName(name) {
@@ -771,6 +798,106 @@
     }).join("|") + "#" + families.length;
   }
 
+  // ---- creating, deleting, renaming and reopening tracks (Phase 4) ----
+
+  // "+ Track": a blank track with no notes, opened straight into the sound
+  // browser so the user picks its instrument the same way an imported
+  // track's own picker already works -- `openSoundBrowser` is unchanged,
+  // MIDI-agnostic from the start.
+  function createTrack() {
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Adding track...');
+    api().create_track('').then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+      if (response.track_key) { openSoundBrowser(response.track_key); }
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function deleteTrack(channel) {
+    if (!api() || !channel || !channel.track_id) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Deleting track...');
+    api().delete_track(channel.track_id).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      // The row this track owned is gone the instant the payload lands --
+      // any UI still pointed at its key would otherwise reference a track
+      // that no longer exists.
+      if (ROLL_PART === channel.key) { closeDetailedRoll(); }
+      if (SELECTED_PART === channel.key) { closeChannelInspectorAndClearSelection(); }
+      if (RENAMING_TRACK_KEY === channel.key) { RENAMING_TRACK_KEY = null; }
+      adopt(response, sequence);
+      render();
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function reopenTrackFromSource(channel) {
+    if (!api() || !channel || !channel.track_id) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Reopening track from source...');
+    api().reopen_track(channel.track_id).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function commitTrackRename(channel, name) {
+    if (!api() || !channel || !channel.track_id) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Renaming track...');
+    api().rename_track(channel.track_id, name).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function trackRow(partKey) {
+    return el("trackList").querySelector('.track-row[data-part="' + partKey + '"]');
+  }
+
+  // A pencil button in each row's actions opens an inline text field in
+  // place of the read-only name -- chosen over reusing single-click (already
+  // the track-select gesture while a roll is open) or double-click (already
+  // reserved to open/close that track's own piano roll, see the listener on
+  // `.track-name` below).
+  function beginTrackRename(partKey) {
+    var channel = partByKey(partKey);
+    if (!channel) { return; }
+    RENAMING_TRACK_KEY = partKey;
+    patchTracks();
+    var row = trackRow(partKey);
+    var input = row && row.querySelector(".track-name-input");
+    if (input) {
+      input.value = channel.track_name || "";
+      input.focus();
+      input.select();
+    }
+  }
+
+  // `commit` is false for Escape (discard) and true for Enter/blur (save,
+  // but only if the text actually changed -- an unedited blur should not
+  // push an undo entry for a rename that never happened).
+  function endTrackRename(commit) {
+    var partKey = RENAMING_TRACK_KEY;
+    if (!partKey) { return; }
+    var channel = partByKey(partKey);
+    var row = trackRow(partKey);
+    var input = row && row.querySelector(".track-name-input");
+    RENAMING_TRACK_KEY = null;
+    patchTracks();
+    if (!commit || !channel || !input) { return; }
+    var name = input.value.trim();
+    if (name !== (channel.track_name || "")) { commitTrackRename(channel, name); }
+  }
+
   function buildTracks() {
     var list = el("trackList");
     list.textContent = "";
@@ -823,7 +950,7 @@
       // none by definition, and a type 1 conductor's name is the song's, so
       // both fall back to the General MIDI instrument, as before parts existed.
       name.textContent = partLabel(channel) + (channel.is_drums ? " \u00b7 Percussion" : "");
-      name.title = channel.notes + " notes \u00b7 " + noteName(channel.lowest) + "\u2013" + noteName(channel.highest) +
+      name.title = channel.notes + " notes \u00b7 " + channelRangeText(channel) +
         " \u00b7 MIDI channel " + (channel.channel + 1) + "\nDouble-click to open or close this track's piano roll";
       // A label double-click is deliberately not built from two delayed
       // single clicks: Windows lets the user choose that interval, so a timer
@@ -833,8 +960,22 @@
         event.stopPropagation();
         toggleTrackRoll(channel.key);
       });
-
       heading.appendChild(name);
+
+      // The inline rename field this row's pencil button opens in place of
+      // `name` above -- see `beginTrackRename`/`endTrackRename`. Hidden
+      // until then; `patchTracks` toggles which of the two is visible.
+      var nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "track-name-input";
+      nameInput.hidden = true;
+      nameInput.setAttribute("aria-label", "Rename " + partLabel(channel));
+      nameInput.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { event.preventDefault(); this.blur(); }
+        else if (event.key === "Escape") { event.preventDefault(); endTrackRename(false); }
+      });
+      nameInput.addEventListener("blur", function () { endTrackRename(true); });
+      heading.appendChild(nameInput);
 
       var actions = document.createElement("div");
       actions.className = "track-actions";
@@ -880,6 +1021,37 @@
         queueDraw();
       });
       actions.appendChild(settingsButton);
+
+      var renameButton = document.createElement("button");
+      renameButton.type = "button";
+      renameButton.className = "track-toggle track-rename-button";
+      renameButton.title = "Rename track";
+      renameButton.setAttribute("aria-label", "Rename " + partLabel(channel));
+      renameButton.appendChild(iconElement("pencil"));
+      renameButton.addEventListener("click", function () { beginTrackRename(channel.key); });
+      actions.appendChild(renameButton);
+
+      // Only a track with a source file has anything to reopen -- a
+      // hand-drawn track has no `.mid` behind it at all.
+      var reopenButton = document.createElement("button");
+      reopenButton.type = "button";
+      reopenButton.className = "track-toggle track-reopen-button";
+      reopenButton.title = "Reopen from source";
+      reopenButton.setAttribute("aria-label", "Reopen " + partLabel(channel) + " from its source file");
+      reopenButton.appendChild(iconElement("folder-open"));
+      reopenButton.hidden = !channel.source_midi;
+      reopenButton.addEventListener("click", function () { reopenTrackFromSource(channel); });
+      actions.appendChild(reopenButton);
+
+      var deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "track-toggle track-delete-button";
+      deleteButton.title = "Delete track";
+      deleteButton.setAttribute("aria-label", "Delete " + partLabel(channel));
+      deleteButton.appendChild(iconElement("trash"));
+      deleteButton.addEventListener("click", function () { deleteTrack(channel); });
+      actions.appendChild(deleteButton);
+
       heading.appendChild(actions);
       row.appendChild(heading);
 
@@ -963,6 +1135,23 @@
       solo.title = entry.soloed
         ? "Remove this track from the solo mix"
         : "Solo this track; other soloed tracks remain audible";
+      var renaming = RENAMING_TRACK_KEY === partKey;
+      var nameLabel = row.querySelector(".track-name");
+      var nameInput = row.querySelector(".track-name-input");
+      if (nameLabel && channel) {
+        // Rebuilt here rather than only in `buildTracks`: a rename changes
+        // neither a track's key nor its program, so `trackShapeKey` does not
+        // change and a full rebuild never runs -- this is the only place the
+        // new name would otherwise reach the row at all.
+        nameLabel.textContent = partLabel(channel) + (channel.is_drums ? " · Percussion" : "");
+        nameLabel.title = channel.notes + " notes · " + channelRangeText(channel) +
+          " · MIDI channel " + (channel.channel + 1) +
+          "\nDouble-click to open or close this track's piano roll";
+      }
+      if (nameLabel) { nameLabel.hidden = renaming; }
+      if (nameInput) { nameInput.hidden = !renaming; }
+      var reopenButton = row.querySelector(".track-reopen-button");
+      if (reopenButton && channel) { reopenButton.hidden = !channel.source_midi; }
     }
   }
 
@@ -4104,6 +4293,63 @@
     }, function (error) { setBusy(false); fail(error); render(); });
   }
 
+  // ---- drawing a new note with a double-click (Phase 4) ----
+
+  // One grid cell's width in milliseconds, at whichever grid the roll is
+  // currently using -- the same `gridTicks` formula `snappedTimeMs` already
+  // quantizes drag positions to, read back out as a duration rather than
+  // used to round one. A freshly drawn note starts life exactly one cell
+  // long, the same way a DAW's pencil tool does.
+  function gridCellDurationMs() {
+    var ticksPerBeat = Number(timingManifest().ticks_per_beat) || 480;
+    var gridTicks = ticksPerBeat * 4 / Math.max(1, activeGridDenominator());
+    return Math.max(1, Math.round(timeAtTick(gridTicks) - timeAtTick(0)));
+  }
+
+  function createNoteAt(trackId, pitch, startMs, durationMs) {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Drawing note...');
+    api().create_note(trackId, pitch, Math.round(startMs), Math.round(durationMs), 100).then(
+      function (response) {
+        setBusy(false);
+        if (!response || !response.ok) { fail(response); render(); return; }
+        adopt(response, sequence);
+        render();
+      },
+      function (error) { setBusy(false); fail(error); render(); }
+    );
+  }
+
+  // Double-click on the detailed roll: on an existing note, delete it (the
+  // same path Delete/Backspace and the inspector's Delete button already
+  // use); on empty space, draw a new one at the grid-snapped time and pitch
+  // under the pointer. Reserved for exactly this since Phase 2 -- see the
+  // comment on the canvas's `contextmenu` listener below, and
+  // `noteEdgeZone`'s single-click gestures, which double-click never
+  // overlaps.
+  function handlePianoRollDoubleClick(event) {
+    if (!hasSong()) { return; }
+    var canvas = el('pianoRoll');
+    var hit = hoveredRenderEvent(canvas);
+    if (hit && hit.record && hit.record.id) {
+      selectNote(hit.record.id);
+      deleteSelectedNote();
+      return;
+    }
+    // Drawing needs exactly one open track to attribute the note to. The
+    // global multi-track overview (ROLL_GLOBAL) has no single track under
+    // the cursor -- drawing there would mean guessing which lane the user
+    // meant from pointer position alone, which this deliberately refuses
+    // to do rather than silently picking one.
+    if (!ROLL_PART || ROLL_GLOBAL) { return; }
+    var channel = partByKey(ROLL_PART);
+    if (!channel || !channel.track_id) { return; }
+    var startMs = snappedTimeMs(positionFromClientX(event.clientX));
+    var pitch = pitchFromClientY(event.clientY);
+    createNoteAt(channel.track_id, pitch, startMs, gridCellDurationMs());
+  }
+
   /* --------------------------------------------------------------- audio */
 
   function ensureAudioContext() {
@@ -5662,8 +5908,9 @@
       partLabel(channel) + " - MIDI channel " + (channel.channel + 1);
     el("channelSound").textContent = assignmentLabel(channel);
     el("channelSound").title = assignmentTitle(channel);
-    el("channelMidiRange").textContent =
-      noteName(channel.lowest) + "-" + noteName(channel.highest);
+    el("channelMidiRange").textContent = channel.lowest === null || channel.lowest === undefined
+      ? "no notes yet"
+      : noteName(channel.lowest) + "-" + noteName(channel.highest);
     el("channelNoteCount").textContent = String(channel.notes || 0);
     syncChannelPercussion(channel);
     renderDrumKeys(channel);
@@ -6885,7 +7132,10 @@
     if (response.pitch_reconciled && response.pitch_reconciled.length) {
       toast('Updated saved automatic pitch settings for this song', 'ok');
     }
-    stamp('Opened ' + baseName(STATE.settings && STATE.settings.midi));
+    // A brand-new song has no `.mid` to name -- `baseName` of an empty path
+    // is itself empty, which would leave the stamp reading a bare "Opened ".
+    var openedPath = STATE.settings && STATE.settings.midi;
+    stamp(openedPath ? 'Opened ' + baseName(openedPath) : 'Started a new song');
   }
 
   function importMidi() {
@@ -6902,11 +7152,43 @@
 
   function reopenMidi() {
     closeMenus();
-    if (!api() || !hasSong()) { return; }
+    if (!api() || !hasSong() || !STATE.settings.midi) { return; }
     var sequence = nextRequest();
     setBusy(true, 'Reopening MIDI...');
     setMidiLoading(true, 'Reopening MIDI...');
     api().load_midi(STATE.settings.midi).then(function (response) { afterLoad(response, sequence); }, function (error) { setBusy(false); setMidiLoading(false); fail(error); render(); });
+  }
+
+  // "File > New Song": a blank song with zero tracks and no .mid at all --
+  // the entry point that makes compose-from-nothing reachable without ever
+  // having imported a file. Reuses `afterLoad` the same way `importMidi`/
+  // `openProject` do; it is the generic "adopt whatever the bridge answered
+  // with" path and does not care whether that answer came with any notes.
+  function newProject() {
+    closeMenus();
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Starting new song...');
+    setMidiLoading(true, 'Starting new song...', 'Preparing a blank song workspace.');
+    api().new_project().then(function (response) {
+      afterLoad(response, sequence);
+    }, function (error) { setBusy(false); setMidiLoading(false); fail(error); render(); });
+  }
+
+  // "File > Import MIDI into current project...": the SECOND import entry
+  // point. Unlike `importMidi` (which replaces the whole song), this appends
+  // the chosen file's tracks onto whatever is already open -- so a drum loop
+  // from one file and a bassline from another can land in the same song.
+  function importMidiIntoProject() {
+    closeMenus();
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Importing MIDI...');
+    setMidiLoading(true, 'Importing MIDI...');
+    api().import_midi_into_project().then(function (response) {
+      if (response && response.cancelled) { setBusy(false); setMidiLoading(false); render(); return; }
+      afterLoad(response, sequence);
+    }, function (error) { setBusy(false); setMidiLoading(false); fail(error); render(); });
   }
 
   // A project is the editable song: tracks, notes and every lever, in a file
@@ -7536,9 +7818,10 @@
     el('midiLoadingState').hidden = !MIDI_LOADING;
     el('emptyState').hidden = MIDI_LOADING || song;
     el('workspace').hidden = MIDI_LOADING || !song;
-    el('songName').textContent = song ? baseName(STATE.settings.midi) : '';
+    el('songName').textContent = song ? (baseName(STATE.settings.midi) || 'Untitled Song') : '';
     el('menuExport').disabled = !song;
     el('exportBtn').disabled = !song;
+    el('addTrackBtn').disabled = !song;
     el('gridResolution').disabled = !song;
     el('timeSignature').disabled = !song;
     el('rollZoom').disabled = !song;
@@ -7588,7 +7871,8 @@
     if (SOUND_BROWSER.open) { return; }
     if (event.ctrlKey && !event.shiftKey && !event.altKey) {
       var key = event.key.toLowerCase();
-      if (key === 'i') { event.preventDefault(); importMidi(); }
+      if (key === 'n') { event.preventDefault(); newProject(); }
+      else if (key === 'i') { event.preventDefault(); importMidi(); }
       else if (key === 'e') { event.preventDefault(); exportMap(); }
       else if (key === 'r') { event.preventDefault(); reopenMidi(); }
       else if (key === 'o') { event.preventDefault(); openProject(); }
@@ -7631,8 +7915,8 @@
     // click-to-delete never gets its target note covered by the inspector
     // panel opening underneath the pointer. Right-click is the deliberate
     // "show me the detail view" gesture instead -- double-click is reserved
-    // for adding/removing notes (a later phase), so the two can never fight
-    // over the same click.
+    // for adding/removing notes (see `handlePianoRollDoubleClick`, Phase 4),
+    // so the two can never fight over the same click.
     canvas.addEventListener('contextmenu', function (event) {
       var hit = hoveredRenderEvent(canvas);
       if (hit && hit.record && hit.record.id) {
@@ -7640,6 +7924,7 @@
         openNoteInspector(hit.record.id);
       }
     });
+    canvas.addEventListener('dblclick', handlePianoRollDoubleClick);
     // The ruler always seeks (nothing there to click-select), and it stays
     // visible in lanes mode -- see .roll-pane in styles.css -- specifically
     // so scrubbing is still possible while lanes are showing. The lanes
@@ -7741,7 +8026,9 @@
     initTransport();
     initFieldCommitOnEnterOrClickAway();
     initChrome();
+    el('menuNewSong').addEventListener('click', newProject);
     el('menuImport').addEventListener('click', importMidi);
+    el('menuImportInto').addEventListener('click', importMidiIntoProject);
     el('menuReopen').addEventListener('click', reopenMidi);
     el('menuOpenProject').addEventListener('click', openProject);
     el('menuSaveProject').addEventListener('click', saveProject);
@@ -7751,6 +8038,8 @@
     el('menuAudio').addEventListener('click', refreshAudio);
     el('audioBanner').addEventListener('click', refreshAudio);
     el('emptyOpenBtn').addEventListener('click', importMidi);
+    el('emptyNewSongBtn').addEventListener('click', newProject);
+    el('addTrackBtn').addEventListener('click', createTrack);
     el('exportBtn').addEventListener('click', exportMap);
     document.addEventListener('keydown', shortcut);
     window.addEventListener('resize', debounce(function () {

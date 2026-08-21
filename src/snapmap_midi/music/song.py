@@ -238,6 +238,18 @@ class Song:
     #: Hands out ids for notes that no MIDI file named. Serialized so a project
     #: reopened twice cannot mint an id it already used.
     note_serial: int = 0
+    #: The highest channel number ever handed to a hand-drawn track (one with
+    #: `source_track == -1`), or -1 before any exist. A hand-drawn track has no
+    #: MIDI provenance, so `channel` is the ONLY thing that varies in its
+    #: `key` ("-1:channel") -- and that key is what the settings document uses
+    #: to keep two tracks' levers apart. Minting the next channel from the
+    #: tracks CURRENTLY in the song (`max(...) + 1`) looks right until one is
+    #: deleted: the max drops, and the next track created reuses the deleted
+    #: one's channel number and therefore its stale, still-present settings
+    #: entry. This counter never drops, so a channel is never handed out
+    #: twice regardless of what has been deleted in between. Serialized for
+    #: the same reason `note_serial` is.
+    drawn_channel_serial: int = -1
 
     @property
     def tempo_map(self) -> list:
@@ -307,6 +319,13 @@ class Song:
             index += 1
         return "t:%d" % index
 
+    def new_drawn_channel(self) -> int:
+        """A channel number no hand-drawn track has ever held, including a
+        deleted one. See `drawn_channel_serial`'s own docstring for why this
+        has to be a counter rather than `max(existing channels) + 1`."""
+        self.drawn_channel_serial += 1
+        return self.drawn_channel_serial
+
 
 # ---- JSON round-trip ----
 
@@ -343,6 +362,7 @@ def to_dict(song: Song) -> dict:
         "timing": copy.deepcopy(song.timing),
         "conversion": copy.deepcopy(song.conversion),
         "note_serial": song.note_serial,
+        "drawn_channel_serial": song.drawn_channel_serial,
         "tracks": [_track_dict(track) for track in song.tracks],
     }
 
@@ -378,6 +398,17 @@ def from_dict(payload) -> Song:
         timing=copy.deepcopy(payload.get("timing") or {}),
         conversion=conversion,
         note_serial=int(payload.get("note_serial") or 0),
+        # Missing in every project written before hand-drawn tracks existed --
+        # -1 is exactly what a song that has never minted one already starts
+        # at, so an old file reads as "nothing drawn yet" rather than failing.
+        # `or 0` is not safe here the way it is for `note_serial` above: 0 is
+        # a real, already-used value for this field the moment one track has
+        # been drawn, not an absent one.
+        drawn_channel_serial=(
+            int(payload["drawn_channel_serial"])
+            if payload.get("drawn_channel_serial") is not None
+            else -1
+        ),
     )
     note_names = {f.name for f in fields(Note)}
     track_names = {f.name for f in fields(Track)}

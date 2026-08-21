@@ -1156,6 +1156,332 @@ def test_a_note_edit_before_a_song_is_open_says_so():
     assert "song" in result["error"]
 
 
+# ---- drawing notes and managing tracks (Phase 4) ----
+
+
+def _new_project_bridge() -> Bridge:
+    """A bridge open on a blank, drawn-from-nothing song -- what makes
+    compose-from-nothing reachable with no `.mid` involved at all."""
+    bridge = Bridge()
+    result = bridge.new_project()
+    assert result["ok"] is True
+    return bridge
+
+
+def test_new_project_opens_a_blank_song_with_no_tracks():
+    bridge = _new_project_bridge()
+    assert bridge.get_settings()["settings"]["midi"] is None
+    payload = bridge.startup()
+    assert payload["analysis"]["channels"] == []
+    # A blank song still answers with a real preview rather than raising --
+    # `Session._blank_timing` exists specifically so `preview_manifest`'s
+    # unconditional `timing["source_duration_ms"]` read does not crash the
+    # first redraw of a song that was never read from a `.mid`.
+    assert payload["preview"]["duration_ms"] > 0
+
+
+def test_new_project_replaces_whatever_song_was_open():
+    bridge = Bridge(midi=TINY_MIDI)
+    assert bridge.startup()["analysis"]["channels"]
+    result = bridge.new_project()
+    assert result["ok"] is True
+    assert result["analysis"]["channels"] == []
+
+
+def test_creating_a_track_answers_with_its_id_and_key():
+    bridge = _new_project_bridge()
+    result = bridge.create_track("Pad")
+    assert result["ok"] is True
+    assert result["track_id"]
+    channel = next(c for c in result["analysis"]["channels"] if c["key"] == result["track_key"])
+    assert channel["track_id"] == result["track_id"]
+    assert channel["track_name"] == "Pad"
+    # An empty track: no note has ever been on it, so there is no lowest or
+    # highest pitch to report -- this is the None-safety fix `from_song` and
+    # `ChannelInfo` needed for a blank track to render at all instead of
+    # `min()`/`max()` raising on an empty histogram.
+    assert channel["lowest"] is None
+    assert channel["highest"] is None
+    assert channel["notes"] == 0
+
+
+def test_creating_two_tracks_gives_them_distinct_keys():
+    """The channel-uniqueness fix this whole phase depends on: two
+    hand-drawn tracks must never collide on `Track.key`, or one's settings
+    would silently overwrite the other's on every save/reload
+    (`project.to_settings` keys `channels` by exactly this string)."""
+    bridge = _new_project_bridge()
+    first = bridge.create_track("Bass")
+    second = bridge.create_track("Lead")
+    assert first["track_key"] != second["track_key"]
+    keys = [c["key"] for c in second["analysis"]["channels"]]
+    assert len(keys) == len(set(keys)) == 2
+
+
+def test_a_deleted_tracks_channel_is_never_reused():
+    """The stronger claim behind `Session.delete_track`'s docstring: even
+    after a track is deleted, no LATER track can be assigned its channel
+    number (and therefore its settings-document key) again.
+    `Song.new_drawn_channel` is a monotonic counter rather than
+    `max(existing channels) + 1` specifically because the latter would let
+    this collide with the deleted track's still-present settings entry."""
+    bridge = _new_project_bridge()
+    first = bridge.create_track("Bass")
+    first_key = first["track_key"]
+    bridge.delete_track(first["track_id"])
+    second = bridge.create_track("Lead")
+    assert second["track_key"] != first_key
+
+
+def test_creating_a_track_can_be_undone_and_redone():
+    bridge = _new_project_bridge()
+    result = bridge.create_track("Bass")
+    track_id = result["track_id"]
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Create track"
+    assert undone["analysis"]["channels"] == []
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Create track"
+    assert [c["track_id"] for c in redone["analysis"]["channels"]] == [track_id]
+
+
+def test_a_track_creation_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.create_track("Bass")
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_creating_a_note_on_a_blank_track():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    result = bridge.create_note(track_id, 60, 0, 480, 100)
+    assert result["ok"] is True
+    events = result["preview"]["display_events"]
+    assert len(events) == 1
+    assert events[0]["pitch"] == 60
+    assert events[0]["start"] == 0
+    assert events[0]["track_id"] == track_id
+
+
+def test_creating_a_note_on_an_unknown_track_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.create_note("t:no-such-track", 60, 0, 480, 100)
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_creating_a_note_can_be_undone_and_redone():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    bridge.create_note(track_id, 60, 0, 480, 100)
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Draw note"
+    assert undone["preview"]["display_events"] == []
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Draw note"
+    assert len(redone["preview"]["display_events"]) == 1
+
+
+def test_a_note_drawn_past_the_songs_length_grows_it():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    before = bridge.preview_manifest()["preview"]["duration_ms"]
+    result = bridge.create_note(track_id, 60, before + 1000, 500, 100)
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == before + 1000 + 500
+
+
+def test_a_drawn_note_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.create_note("t:1", 60, 0, 480, 100)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_deleting_a_track_removes_it_and_its_notes():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    result = bridge.delete_track(track_id)
+    assert result["ok"] is True
+    assert track_id not in [c["track_id"] for c in result["analysis"]["channels"]]
+    assert all(e["track_id"] != track_id for e in result["preview"]["display_events"])
+
+
+def test_deleting_an_unknown_track_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.delete_track("t:no-such-track")
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_deleting_a_track_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    before_keys = [c["key"] for c in bridge.startup()["analysis"]["channels"]]
+    bridge.delete_track(track_id)
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Delete track"
+    assert [c["key"] for c in undone["analysis"]["channels"]] == before_keys
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Delete track"
+    assert track_id not in [c["track_id"] for c in redone["analysis"]["channels"]]
+
+
+def test_a_track_deletion_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.delete_track("t:1")
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_renaming_a_track_changes_its_display_name():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    result = bridge.rename_track(track_id, "Lead synth")
+    assert result["ok"] is True
+    channel = next(c for c in result["analysis"]["channels"] if c["track_id"] == track_id)
+    assert channel["track_name"] == "Lead synth"
+
+
+def test_renaming_a_track_can_be_undone_and_redone():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, _ = _first_note(bridge)
+    before_name = next(
+        c for c in bridge.startup()["analysis"]["channels"] if c["track_id"] == track_id
+    )["track_name"]
+    bridge.rename_track(track_id, "Lead synth")
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Rename track"
+    restored = next(c for c in undone["analysis"]["channels"] if c["track_id"] == track_id)
+    assert restored["track_name"] == before_name
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Rename track"
+    reapplied = next(c for c in redone["analysis"]["channels"] if c["track_id"] == track_id)
+    assert reapplied["track_name"] == "Lead synth"
+
+
+def test_a_track_rename_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.rename_track("t:1", "Lead")
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_reopening_a_track_re_reads_notes_from_the_source_file(tmp_path):
+    bridge = _bridge(tmp_path)
+    track_id, note_id = _first_note(bridge)
+    before_starts = sorted(
+        e["start"]
+        for e in bridge.preview_manifest()["preview"]["display_events"]
+        if e["track_id"] == track_id
+    )
+    bridge.move_note(track_id, note_id, 9999, 40)
+    result = bridge.reopen_track(track_id)
+    assert result["ok"] is True
+    after_starts = sorted(
+        e["start"] for e in result["preview"]["display_events"] if e["track_id"] == track_id
+    )
+    assert after_starts == before_starts
+
+
+def test_reopening_a_hand_drawn_track_is_refused():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    result = bridge.reopen_track(track_id)
+    assert result["ok"] is False
+    assert "source" in result["error"]
+
+
+def test_reopening_an_unknown_track_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.reopen_track("t:no-such-track")
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_reopening_a_track_can_be_undone(tmp_path):
+    bridge = _bridge(tmp_path)
+    track_id, note_id = _first_note(bridge)
+    before = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_id
+    )
+    bridge.move_note(track_id, note_id, before["start"] + 5000, before["pitch"])
+    bridge.reopen_track(track_id)
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Reopen from source"
+    restored = [e for e in undone["preview"]["display_events"] if e["track_id"] == track_id]
+    assert any(e["start"] == before["start"] + 5000 for e in restored)
+
+
+def test_a_track_reopen_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.reopen_track("t:1")
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_importing_midi_into_the_current_project_adds_tracks_beside_the_existing_ones(tmp_path):
+    bridge = _bridge(tmp_path)
+    before = bridge.startup()["analysis"]["channels"]
+    result = bridge.import_midi_into_project(TINY_MIDI)
+    assert result["ok"] is True
+    after = result["analysis"]["channels"]
+    assert len(after) == len(before) * 2
+    before_keys = {c["key"] for c in before}
+    after_keys = {c["key"] for c in after}
+    assert before_keys <= after_keys
+
+
+def test_importing_midi_into_the_current_project_leaves_existing_settings_alone(tmp_path):
+    bridge = _bridge(tmp_path)
+    channel = bridge.startup()["analysis"]["channels"][0]
+    bridge.apply_settings({"channels": {channel["key"]: {"muted": True}}})
+    result = bridge.import_midi_into_project(TINY_MIDI)
+    assert result["ok"] is True
+    assert bridge.get_settings()["settings"]["channels"][channel["key"]]["muted"] is True
+
+
+def test_importing_midi_into_the_current_project_can_be_undone_and_redone(tmp_path):
+    bridge = _bridge(tmp_path)
+    before = {c["track_id"] for c in bridge.startup()["analysis"]["channels"]}
+    result = bridge.import_midi_into_project(TINY_MIDI)
+    assert result["ok"] is True
+    added = {c["track_id"] for c in result["analysis"]["channels"]} - before
+    assert added
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Import MIDI"
+    assert {c["track_id"] for c in undone["analysis"]["channels"]} == before
+
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Import MIDI"
+    assert {c["track_id"] for c in redone["analysis"]["channels"]} == before | added
+
+
+def test_importing_midi_into_the_current_project_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.import_midi_into_project(TINY_MIDI)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_import_midi_into_project_with_no_window_and_no_path_is_cancelled():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.import_midi_into_project()
+    assert result == {"ok": False, "cancelled": True}
+
+
 # ---- song length and loop ----
 
 

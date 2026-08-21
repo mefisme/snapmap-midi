@@ -1211,6 +1211,30 @@ def test_an_integer_channel_key_becomes_the_string_json_will_write():
     }
 
 
+def test_a_hand_drawn_tracks_key_validates_despite_its_negative_track():
+    """`"-1:channel"` is `Track.source_track`'s own convention (see
+    `music/song.py::Track`) for a track drawn from nothing rather than
+    imported -- not a corrupt key. `Session.create_track`/`project.to_settings`
+    write exactly this shape the moment a workstation user adds a blank track
+    and gives it a sound, so `_part_key` refusing every negative track would
+    make `apply_settings` reject that entry outright and the sound picker
+    would look like it silently failed."""
+    doc = settings.validate({**settings.defaults(), "channels": {"-1:0": {"family": "ins_tri"}}})
+    assert doc["channels"] == {
+        "-1:0": {"family": "ins_tri", "percussion": "auto", "muted": False, "soloed": False}
+    }
+    kwargs = settings.to_compile_kwargs(doc)
+    assert kwargs["channel_families"] == {(-1, 0): "ins_tri"}
+
+
+def test_a_track_more_negative_than_a_hand_drawn_one_is_still_refused():
+    """`-1` is the only negative track number this codebase can ever produce;
+    anything past it is a corrupt document, not a hand-drawn track, and must
+    stay refused."""
+    with pytest.raises(settings.SettingsError, match="negative track"):
+        settings.validate({**settings.defaults(), "channels": {"-2:0": {"family": "ins_tri"}}})
+
+
 # ---- what the compiler is handed ----
 
 

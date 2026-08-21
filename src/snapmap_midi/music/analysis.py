@@ -59,6 +59,17 @@ class ChannelInfo:
     drum_keys: dict
     track: int = 0
     track_name: str = ""
+    #: The `Track.id` this channel was read from, or "" when there is none to
+    #: read (the file-based `analyze` has no `Song` and therefore no track
+    #: identity). `from_song` always sets this; it is what lets the window
+    #: draw a note onto a track that has no notes yet at all -- a hand-drawn
+    #: note has no existing preview event to read a `track_id` off, so the
+    #: channel/part payload is where it has to come from instead.
+    track_id: str = ""
+    #: The file a track was imported from, or None for one drawn from
+    #: nothing. Carried here so the window can show or hide a per-track
+    #: "Reopen from source" action without a second round trip.
+    source_midi: Optional[str] = None
 
     @property
     def key(self) -> str:
@@ -221,12 +232,19 @@ def from_song(song) -> MidiAnalysis:
     table = drum_table()
     channels = []
     for track in sorted(song.tracks, key=lambda t: t.part):
-        if not track.notes:
-            continue
+        # A track with no notes yet -- freshly drawn, or every note deleted --
+        # still gets a row. `analysis.channels` is the ONLY thing the whole
+        # frontend track column iterates (`buildTracks`/`buildLanesView`), so
+        # skipping it here would make the track unselectable, unable to take
+        # a sound, and unable to ever receive a drawn note: exactly the
+        # compose-from-nothing case this phase exists to support.
         pitches: dict = {}
         for note in track.notes:
             pitches[note.pitch] = pitches.get(note.pitch, 0) + 1
-        program = track.notes[0].program
+        # An empty track has no note to read a program off; 0 (Acoustic Grand
+        # Piano) is the same silent default a channel nobody has touched gets
+        # anywhere else in this module.
+        program = track.notes[0].program if track.notes else 0
         is_drums = is_percussion_part(
             {track.part: track.percussion}, track.source_track, track.channel, drums_on
         )
@@ -238,14 +256,24 @@ def from_song(song) -> MidiAnalysis:
                 # instrument, so the melodic name is simply the wrong table.
                 program_name=(gm_drum_kit_name(program) if is_drums else gm_program_name(program)),
                 notes=sum(pitches.values()),
-                lowest=min(pitches),
-                highest=max(pitches),
+                # None rather than a number for an empty track: there is no
+                # lowest or highest note, and `min`/`max` on an empty
+                # histogram would raise rather than answer that. Every
+                # consumer of these two fields already treats `None` as a
+                # real, expected answer -- `ChannelInfo`'s own typing has
+                # always said `Optional[int]`, and `Session.channel_info`
+                # already raises on exactly this pair for a different reason
+                # (nothing to pitch-anchor a sound choice against).
+                lowest=min(pitches) if pitches else None,
+                highest=max(pitches) if pitches else None,
                 is_drums=is_drums,
                 auto_family=None if is_drums else gm_to_family(program),
                 pitches=pitches,
                 drum_keys={k: table.get(k) for k in sorted(pitches)} if is_drums else {},
                 track=track.source_track,
                 track_name=track.name,
+                track_id=track.id,
+                source_midi=track.source_midi,
             )
         )
     return MidiAnalysis(
@@ -271,6 +299,8 @@ def as_dict(analysis: MidiAnalysis) -> dict:
                 "key": c.key,
                 "track": c.track,
                 "track_name": c.track_name,
+                "track_id": c.track_id,
+                "source_midi": c.source_midi,
                 "channel": c.channel,
                 "program": c.program,
                 "program_name": c.program_name,

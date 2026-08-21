@@ -250,7 +250,12 @@ def _part_key(key, what: str = "channel") -> str:
     what lets a lead and a pad sharing channel 0 hold different instruments.
 
     Tracks have no upper bound the way channels do -- a file may hold as many as
-    it likes -- so only the channel half is range-checked.
+    it likes -- so only the channel half is range-checked. `-1` is the one
+    negative value accepted: it is `Track.source_track`'s own convention (see
+    `music/song.py::Track`) for a track drawn from nothing rather than
+    imported, so `"-1:channel"` is a real, expected key here -- exactly what
+    `create_track` mints -- and not a corrupt document. Anything more negative
+    than that is not a track this codebase can ever produce and stays refused.
     """
     if isinstance(key, str) and ":" in key:
         track, _, channel = key.partition(":")
@@ -258,7 +263,7 @@ def _part_key(key, what: str = "channel") -> str:
             number = int(track)
         except ValueError:
             raise SettingsError("%s %r does not start with a track number" % (what, key)) from None
-        if number < 0:
+        if number < -1:
             raise SettingsError("%s %r has a negative track" % (what, key))
         return "%d:%s" % (number, _index(channel, _MAX_CHANNEL, what))
     return _index(key, _MAX_CHANNEL, what)

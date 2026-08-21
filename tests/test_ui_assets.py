@@ -786,6 +786,15 @@ def test_the_sound_browser_can_switch_a_track_to_a_drum_kit():
     # No standalone one-click action -- removed in favor of the row above.
     assert "function chooseTrackAsPercussion" not in _JS
 
+    # Confirming a choice here is its own undo step (`Bridge.choose_sound`),
+    # not a generic `applyPatch` -- losing the sample you had before would
+    # otherwise mean re-browsing or re-searching to get it back rather than
+    # one Ctrl+Z. Not the queued/coalescing path either: that exists for
+    # rapid-fire edits like a dragged slider, which a one-shot instrument
+    # pick is not.
+    assert "api().choose_sound(partKey, body).then(" in fn
+    assert "applyPatch(patch, false)" not in fn
+
 
 def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
     """Reserved since Phase 2 (see the comment beside the roll's `contextmenu`

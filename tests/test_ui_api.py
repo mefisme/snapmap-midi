@@ -1717,6 +1717,56 @@ def test_settings_apply_as_a_patch_and_answer_with_the_whole_document():
     assert bridge.get_settings()["settings"] == payload["settings"]
 
 
+def test_choosing_an_instrument_can_be_undone_and_redone():
+    """Every other settings patch (mute, solo, volume, tuning) is
+    deliberately not undo-tracked -- see `Session.set_loop_enabled`'s own
+    docstring -- but losing the exact sample you had chosen means
+    re-browsing or re-searching the whole catalog to get it back, not one
+    more click, so this is the one that earns a real Ctrl+Z step."""
+    bridge = Bridge(midi=TINY_MIDI)
+    body = {"family": "ins_marimba", "sound": None, "percussion": "auto"}
+    result = bridge.choose_sound("0", body)
+    assert result["ok"] is True
+    assert result["settings"]["channels"]["0"]["family"] == "ins_marimba"
+
+    result = bridge.choose_sound("0", {"family": "ins_piano", "sound": None, "percussion": "auto"})
+    assert result["ok"] is True
+    assert result["settings"]["channels"]["0"]["family"] == "ins_piano"
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Choose instrument"
+    assert undone["settings"]["channels"]["0"]["family"] == "ins_marimba"
+
+    redone = bridge.redo()
+    assert redone["ok"] is True
+    assert redone["history"]["redone"] == "Choose instrument"
+    assert redone["settings"]["channels"]["0"]["family"] == "ins_piano"
+
+
+def test_undoing_the_first_instrument_choice_clears_it_back_to_unset():
+    """`choose_sound`'s revert restores exactly what was there before --
+    which, the first time, is nothing -- not merely the choice before that
+    one. `family` reads back `None` (validate's normalized shape always
+    carries the key; `None` is what "no instrument chosen" looks like)."""
+    bridge = Bridge(midi=TINY_MIDI)
+    assert bridge.get_settings()["settings"]["channels"].get("0", {}).get("family") is None
+    bridge.choose_sound("0", {"family": "ins_marimba", "sound": None, "percussion": "auto"})
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["settings"]["channels"]["0"]["family"] is None
+    assert undone["settings"]["channels"]["0"]["percussion"] == "auto"
+
+
+def test_choosing_an_instrument_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    body = {"family": "ins_marimba", "sound": None, "percussion": "auto"}
+    result = bridge.choose_sound("0", body)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
 def test_changing_a_sound_preserves_note_expression_and_channel_configuration():
     bridge = Bridge(midi=TINY_MIDI)
     sounds = palette.sounds_in_category("ins_piano")[:2]

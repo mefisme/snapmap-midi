@@ -964,6 +964,48 @@ class Session:
             if self._song is not None:
                 self._analysis = self._analyze()
 
+    def choose_sound(self, part_key, values) -> None:
+        """Change one track's instrument (family, sound, or percussion), undoably.
+
+        Every other settings patch -- mute, solo, volume, tuning -- is
+        deliberately NOT undo-tracked (see `set_loop_enabled`'s own
+        docstring for why): reverting one is a single click away. Losing the
+        exact sample that had been chosen is a different order of cost --
+        finding it again means re-browsing or re-searching the whole catalog,
+        not one more click -- so this is the one settings-document patch
+        that earns a real undo step.
+
+        `values` is exactly the patch the sound picker already builds
+        (`family`, `sound`, `percussion`, and for an exact sound the
+        pitch-follow reset fields alongside them). Every key it contains is
+        captured before and after, so a revert restores precisely what was
+        there rather than what a generic "undo everything" would guess at --
+        a key absent from the document before reads back as `None`, which
+        `apply`/`settings.merge` already treat as "remove this field." One
+        exception: `percussion` is a required enum with no `None` reading --
+        unlike `family`/`sound`, `settings._channels` never treats a bare
+        `None` there as "unset," so a channel that never had one set an
+        explicit choice on reverts to `"auto"`, not `None`.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            existing = (self._doc.get("channels") or {}).get(part_key, {})
+            before = {
+                field: existing.get(field, "auto" if field == "percussion" else None)
+                for field in values
+            }
+            after = dict(values)
+
+            def _apply():
+                self.apply({"channels": {part_key: after}})
+
+            def _revert():
+                self.apply({"channels": {part_key: before}})
+
+            _apply()
+            self.push_command("Choose instrument", revert=_revert, apply=_apply)
+
     # ---- undo ----
 
     def push_command(self, label: str, revert, apply=None) -> None:

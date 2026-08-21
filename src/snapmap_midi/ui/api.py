@@ -732,6 +732,24 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    def choose_sound(self, part_key, values) -> dict:
+        """Change one track's instrument, as its own undoable step.
+
+        Separate from `apply_settings`: every other settings patch is
+        deliberately not undo-tracked, but losing the exact sample just
+        chosen means re-browsing or re-searching the whole catalog to get it
+        back rather than a click, which is worth a real Ctrl+Z step -- see
+        `Session.choose_sound`.
+        """
+        try:
+            self._session.choose_sound(part_key, values)
+            payload = {"ok": True}
+            payload.update(self._state(interactive=True))
+            payload.update(self._save_sidecar())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     def set_drum_defaults(self, defaults) -> dict:
         """Store the user's own percussion table and re-read the song.
 

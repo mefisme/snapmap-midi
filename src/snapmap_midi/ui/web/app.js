@@ -2277,11 +2277,23 @@
     var body = { family: null, sound: null, percussion: "auto" };
     if (candidate.kind === "family") { body.family = candidate.value; }
     else if (candidate.kind === "percussion") { body.percussion = "kit"; }
+    // A direct bridge call rather than `applyPatch`: that queue exists to
+    // coalesce rapid-fire edits like a dragged slider, which this is not,
+    // and `choose_sound` is a real undo step (unlike every other settings
+    // patch) that a plain `applyPatch` would not record as one -- losing
+    // the sample you had before would otherwise mean re-browsing or
+    // re-searching for it instead of one Ctrl+Z.
     function commit() {
-      var patch = { channels: {} };
-      patch.channels[partKey] = body;
       closeSoundBrowser();
-      applyPatch(patch, false);
+      if (!api()) { return; }
+      var sequence = nextRequest();
+      setBusy(true, 'Choosing instrument...');
+      api().choose_sound(partKey, body).then(function (response) {
+        setBusy(false);
+        if (!response || !response.ok) { fail(response); render(); return; }
+        adopt(response, sequence);
+        render();
+      }, function (error) { setBusy(false); fail(error); render(); });
     }
     if (candidate.kind !== "sound") {
       commit();

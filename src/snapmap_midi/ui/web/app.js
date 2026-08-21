@@ -1696,6 +1696,22 @@
       SOUND_BROWSER.mode === "families", 0,
       function () { selectSoundMode("families"); }, false, false
     ));
+    // A drum kit is not one sound the way a family or an exact event is --
+    // it is 128 possible per-key sounds with sensible GM defaults, which is
+    // exactly what the track settings panel's drum-key list already handles
+    // (`renderDrumKeys`). So this is not a fourth "browse and confirm" mode
+    // the way the three above are: picking it is a direct action -- flip
+    // `percussion` to "kit" and hand off straight to that existing list --
+    // not a candidate this modal collects and confirms. Without this, the
+    // only way to make a track (especially a freshly drawn one, which has no
+    // notes for automatic detection to key off) play as drums was to dig
+    // into track settings, never reachable from here at all.
+    var channel = partByKey(SOUND_BROWSER.part);
+    host.appendChild(soundTreeButton(
+      "Percussion / drum kit", "music-2", null,
+      !!(channel && channel.is_drums), 0,
+      function () { chooseTrackAsPercussion(channel); }, false, false
+    ));
     var divider = document.createElement("div");
     divider.className = "sound-tree-divider";
     host.appendChild(divider);
@@ -2205,6 +2221,20 @@
     SOUND_BROWSER.drumKey = null;
     el("soundScopeField").hidden = true;
     el("soundBrowserOverlay").hidden = true;
+  }
+
+  // "Percussion / drum kit" in the sound browser's own tree: the same patch
+  // the track settings panel's "Drum kit" dropdown option already sends
+  // (`{ percussion: "kit" }`), so nothing new has to exist on the backend
+  // for this to work. Waits for that patch to land before opening the
+  // settings panel so it opens already showing the fresh drum-key list
+  // rather than a flash of the pitched-instrument controls it is replacing.
+  function chooseTrackAsPercussion(channel) {
+    if (!channel) { return; }
+    closeSoundBrowser();
+    applyPatch(partPatch(channel, { percussion: "kit" }), true).then(function () {
+      openChannelInspector(channel.key);
+    });
   }
 
   function useSoundBrowserSelection() {

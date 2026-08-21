@@ -743,6 +743,26 @@ def test_a_track_can_be_added_renamed_deleted_and_reopened_from_source():
     assert "if (reopenItem && channel) { reopenItem.hidden = !channel.source_midi; }" in _JS
 
 
+def test_the_sound_browser_can_switch_a_track_to_a_drum_kit():
+    """Before this, the only way to make ANY track (especially a freshly
+    drawn one -- it has no notes for automatic percussion detection to key
+    off) play as drums was to dig into track settings; the sound browser
+    opened by "+ Track" and every track's own sound picker offered only
+    pitched families and exact sample events. A drum kit is not a fourth
+    thing this modal collects and confirms the way those are -- it is 128
+    possible per-key sounds with GM defaults, which the track settings
+    panel's drum-key list (`renderDrumKeys`) already handles -- so picking
+    it is a direct action: send the exact same `{ percussion: "kit" }` patch
+    the settings panel's own "Drum kit" dropdown option already sends, then
+    hand off straight to that existing list."""
+    assert 'host.appendChild(soundTreeButton(\n      "Percussion / drum kit"' in _JS
+    assert "function chooseTrackAsPercussion(channel)" in _JS
+    fn = _JS.split("function chooseTrackAsPercussion(channel) {", 1)[1].split("\n  }", 1)[0]
+    assert "closeSoundBrowser();" in fn
+    assert 'applyPatch(partPatch(channel, { percussion: "kit" }), true).then(' in fn
+    assert "openChannelInspector(channel.key);" in fn
+
+
 def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
     """Reserved since Phase 2 (see the comment beside the roll's `contextmenu`
     listener): double-click deletes a hit note the same way Delete/Backspace

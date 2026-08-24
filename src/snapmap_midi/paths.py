@@ -174,17 +174,43 @@ def _config() -> dict:
     if not raw:
         return {}
     if raw.startswith("{"):
-        try:
-            return json.loads(raw)
-        except ValueError:
-            return {}
+        parsed = _parse_config(raw, "%s is not valid JSON" % ENV_VAR)
+        return parsed if parsed is not None else {}
     path = Path(raw)
     if not path.is_file():
+        warnings.warn(
+            "%s points at %r but no such file exists; ignoring it" % (ENV_VAR, str(path)),
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return {}
+    parsed = _parse_config(
+        path.read_text(encoding="utf-8"), "%s (%s) is not valid JSON" % (ENV_VAR, path)
+    )
+    return parsed if parsed is not None else {}
+
+
+def _parse_config(text: str, what: str) -> dict | None:
+    """Parse a config object, warning (not silently degrading) on bad input.
+
+    A silently-swallowed typo is the exact quiet-wrong-answer this module warns
+    about everywhere else: the tool reports success while ignoring the thing you
+    asked it to use. A non-object top level (e.g. a JSON array) is treated the
+    same way, so the caller's `.get(name)` cannot raise `AttributeError`.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
+        value = json.loads(text)
+    except ValueError as exc:
+        warnings.warn("%s: %s; ignoring it" % (what, exc), RuntimeWarning, stacklevel=3)
+        return None
+    if not isinstance(value, dict):
+        warnings.warn(
+            "%s: expected a JSON object, got %s; ignoring it" % (what, type(value).__name__),
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+    return value
 
 
 def resolve(name: str) -> Path | None:

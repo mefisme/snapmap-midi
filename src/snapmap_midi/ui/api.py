@@ -171,31 +171,23 @@ class Bridge:
         file yet" and "a file that compiles to nothing" are different states,
         and a zero would make the window describe the second one while the user
         is looking at the first.
+
+        The song-derived pieces come from one `redraw_state` call so they are
+        read under a single lock hold. Assembling them from four separately
+        locked reads let an edit on another thread land between two of them and
+        hand the window a frame mixing before- and after-edit state. (The full
+        Timeline byte size stays out of this fast path -- it remains available
+        through Dry Run and Export, the only operations that consume it.)
         """
-        analysis = self._session.analysis_dict()
-        if analysis is None:
-            stats = None
-            preview = None
-        else:
-            # Initial load and interactive edits need the rendered notes and
-            # headline status, not a freshly serialized rawmap. Doing a full
-            # compile here made a dense song parse once for export statistics
-            # and again for preview before the first useful frame appeared.
-            # Exact Timeline byte size remains available through Dry Run and
-            # Export, which are the only operations that consume it.
-            preview, stats = self._session.preview_manifest(with_stats=True)
-        return {
-            # Outside the settings document on purpose: it is an answer about
-            # this person's kit, not about this song. It rides in the redraw
-            # payload anyway, because the rows that show a key's sound have to
-            # say which of the two tables it came from.
-            "drum_defaults": {str(key): sound for key, sound in gm.user_drum_table().items()},
-            "settings": self._session.settings(),
-            "analysis": analysis,
-            "rulers": self._session.rulers(),
-            "stats": stats,
-            "preview": preview,
+        state = self._session.redraw_state()
+        # Outside the settings document on purpose: it is an answer about this
+        # person's kit, not about this song. It rides in the redraw payload
+        # anyway, because the rows that show a key's sound have to say which of
+        # the two tables it came from.
+        state["drum_defaults"] = {
+            str(key): sound for key, sound in gm.user_drum_table().items()
         }
+        return state
 
     def _catalog(self) -> dict:
         """Every choice the window offers, derived from the palette rather than listed.
@@ -328,6 +320,10 @@ class Bridge:
             payload["window"] = self._window_state()
             if reconciled:
                 payload["pitch_reconciled"] = reconciled
+                # Persist the repair. Every other mutation path autosaves; this
+                # one used to leave the corrected root in memory only, so the
+                # next open recomputed it from the same stale saved value.
+                payload.update(self._save_sidecar())
             if self._error:
                 payload["error"] = self._error
             return payload
@@ -361,6 +357,10 @@ class Bridge:
             payload["catalog"] = self._catalog()
             if reconciled:
                 payload["pitch_reconciled"] = reconciled
+                # Persist the repair, like every other mutation path does. A
+                # read error from `_restore` still wins the `sidecar_error` slot
+                # below -- that is the message the user can act on.
+                payload.update(self._save_sidecar())
             if sidecar_error is not None:
                 payload["sidecar_error"] = sidecar_error
             return payload
@@ -688,7 +688,10 @@ class Bridge:
             }
             outside = [name for name in requested if name not in allowed]
             if outside:
-                raise ValueError("%r is not used by the current converted song" % outside[0])
+                raise ValueError(
+                    "%d sample name(s) not used by the current converted song: %s"
+                    % (len(outside), ", ".join(repr(name) for name in outside))
+                )
 
             from snapmap_midi.audio import library
 
@@ -927,6 +930,47 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    def bulk_edit_notes(self, edits) -> dict:
+        """Move/resize/retype several notes at once, as one undo step."""
+        try:
+            self._session.bulk_edit_notes(edits)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def bulk_delete_notes(self, notes) -> dict:
+        """Remove several notes at once, as one undo step."""
+        try:
+            self._session.bulk_delete_notes(notes)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def bulk_create_notes(self, track_id, notes) -> dict:
+        """Create several notes on one track at once, as one undo step. Answers with their ids."""
+        try:
+            note_ids = self._session.bulk_create_notes(track_id, notes)
+            payload = {"ok": True, "note_ids": note_ids}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def duplicate_notes(self, items) -> dict:
+        """Repeat several notes at once, each onto its own track, as one undo
+        step. Answers with the new notes' ids."""
+        try:
+            note_ids = self._session.duplicate_notes(items)
+            payload = {"ok": True, "note_ids": note_ids}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     # ---- tracks ----
 
     def create_track(self, name="") -> dict:
@@ -1066,6 +1110,68 @@ class Bridge:
         except Exception as exc:
             return _fail(exc)
 
+    # ---- tempo and time signature ----
+
+    def add_tempo_change(self, time_ms, bpm) -> dict:
+        """Add a new tempo-change point."""
+        try:
+            self._session.add_tempo_change(time_ms, bpm)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def edit_tempo_change(self, tick, time_ms, bpm) -> dict:
+        """Move an existing tempo-change point and/or change its BPM."""
+        try:
+            self._session.edit_tempo_change(tick, time_ms, bpm)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def delete_tempo_change(self, tick) -> dict:
+        """Remove a tempo-change point."""
+        try:
+            self._session.delete_tempo_change(tick)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def add_time_signature(self, time_ms, numerator, denominator) -> dict:
+        """Add a new time-signature-change point."""
+        try:
+            self._session.add_time_signature(time_ms, numerator, denominator)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def edit_time_signature(self, tick, time_ms, numerator, denominator) -> dict:
+        """Move an existing time-signature point and/or change its meter."""
+        try:
+            self._session.edit_time_signature(tick, time_ms, numerator, denominator)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
+    def delete_time_signature(self, tick) -> dict:
+        """Remove a time-signature point."""
+        try:
+            self._session.delete_time_signature(tick)
+            payload = {"ok": True}
+            payload.update(self._state())
+            return payload
+        except Exception as exc:
+            return _fail(exc)
+
     # ---- compiling ----
 
     def dry_run(self) -> dict:
@@ -1097,6 +1203,31 @@ class Bridge:
             result = self._session.export()
             result["ok"] = True
             result.update(self._save_sidecar())
+            return result
+        except Exception as exc:
+            return _fail(exc)
+
+    def export_midi(self, path=None) -> dict:
+        """Write the open song's current, edited notes and tempo map as a plain `.mid`.
+
+        A pure export action like `export()`, never undo-tracked. With no
+        path and no window this is cancelled rather than guessing a
+        location, the same rule `import_midi_into_project` follows -- unlike
+        the project file, there is no "beside the song" convention for a
+        format the song may never have started as.
+        """
+        try:
+            if path is None:
+                if self._window is None:
+                    return _cancelled()
+                song = self._session.song()
+                stem = Path(song.origin).stem if song and song.origin else "song"
+                chosen = self._save_dialog(_MIDI_TYPES, stem + ".mid")
+                if chosen is None:
+                    return _cancelled()
+                path = chosen
+            result = self._session.export_midi(path)
+            result["ok"] = True
             return result
         except Exception as exc:
             return _fail(exc)

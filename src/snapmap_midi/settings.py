@@ -504,18 +504,22 @@ def _channels(section, families, sounds) -> dict:
 
         if sound is not None:
             normalized["sound"] = sound
-            expression_fields = _CHANNEL_KEYS - {
-                "family",
-                "sound",
-                "muted",
-                "soloed",
-                "volume_db",
-                "pitch_follow_preference",
-                "release_s",
-                "hard_stop",
-                "note_off",
-                "note_off_floor_ms",
-                "attack_ms",
+            # Only the pitch-follow controls arm the block below. This used to
+            # be `_CHANNEL_KEYS - {...}`, which still left in fields such as
+            # key_range, pitch_octave, pitch_transpose, sustain_ms, voices and
+            # polyphony -- all validated and stored earlier in this function.
+            # Setting one of those on a channel that also names a sound then
+            # spuriously injected pitch_follow keys the user never touched,
+            # polluting the sidecar and breaking the byte-identical-output gate.
+            # List exactly the fields the block reads instead.
+            expression_fields = {
+                "pitch_follow",
+                "root_midi",
+                "detected_root_midi",
+                "root_confidence",
+                "root_source",
+                "fine_tune_cents",
+                "glide_ms",
             }
             if any(key in entry for key in expression_fields):
                 pitch_follow = _flag(

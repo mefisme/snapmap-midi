@@ -41,7 +41,7 @@ from snapmap_midi.compile import (
     installed_event_duration_ms,
     installed_event_is_looping,
 )
-from snapmap_midi.music import analysis, importer, pipeline
+from snapmap_midi.music import analysis, importer, midi_export, pipeline
 from snapmap_midi.music import song as song_module
 from snapmap_midi.music import timing as timing_module
 from snapmap_midi.music.levers import compile_levers
@@ -576,6 +576,236 @@ class Session:
             self.push_command("Draw note", revert=_revert, apply=_apply)
             self._analysis = self._analyze()
 
+    # ---- bulk note editing (Phase 5: multi-select and paste) ----
+
+    def bulk_edit_notes(self, edits) -> None:
+        """Move/resize/retype several notes at once, as one undo step.
+
+        Reuses exactly the validation `move_note`/`resize_note`/
+        `set_note_velocity` already apply, note by note, but replays and
+        reverts the whole batch through a single `Command` -- the same
+        "one user action, one undo entry" rule `choose_sound` establishes for
+        a single settings change, extended to however many notes a selection
+        holds. A box-selected drag across ten notes should take one Ctrl+Z to
+        undo, not ten.
+
+        Every edit is validated BEFORE any note is touched: `prepared` is
+        built fully, and only once every edit in it has passed, does
+        `_apply` run. A batch that fails halfway through must never leave
+        some notes moved and others not, with no single command describing
+        either state.
+
+        Each edit names its note by `{track_id, note_id}` and sets only the
+        fields it means to touch -- `start_ms`, `pitch`, `duration_ms`,
+        `velocity` -- so a caller that only wants to transpose pitch never
+        has to resend a note's own timing back at it unchanged.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            if not isinstance(edits, list) or not edits:
+                raise ValueError("bulk_edit_notes needs a non-empty list of edits")
+            song = self._song
+            prepared = []
+            for index, edit in enumerate(edits):
+                if not isinstance(edit, dict):
+                    raise ValueError("edit %d is not an object" % index)
+                _track, note = self._track_and_note(edit.get("track_id"), edit.get("note_id"))
+                before = {
+                    "start_ms": note.start_ms,
+                    "pitch": note.pitch,
+                    "duration_ms": note.duration_ms,
+                    "velocity": note.velocity,
+                }
+                after = dict(before)
+                if edit.get("start_ms") is not None:
+                    after["start_ms"] = self._require_ms(edit["start_ms"], "start_ms", minimum=0)
+                if edit.get("pitch") is not None:
+                    after["pitch"] = self._require_midi_value(edit["pitch"], "pitch")
+                if edit.get("duration_ms") is not None:
+                    after["duration_ms"] = self._require_ms(
+                        edit["duration_ms"], "duration_ms", minimum=1
+                    )
+                if edit.get("velocity") is not None:
+                    after["velocity"] = self._require_midi_value(edit["velocity"], "velocity")
+                prepared.append((note, before, after))
+
+            duration_before = song.duration_ms
+            duration_after = duration_before
+            for _note, _before, after in prepared:
+                duration_after = max(duration_after, after["start_ms"] + after["duration_ms"])
+
+            def _apply():
+                for note, _before, after in prepared:
+                    note.start_ms = after["start_ms"]
+                    note.pitch = after["pitch"]
+                    note.duration_ms = after["duration_ms"]
+                    note.velocity = after["velocity"]
+                song.duration_ms = duration_after
+
+            def _revert():
+                for note, before, _after in prepared:
+                    note.start_ms = before["start_ms"]
+                    note.pitch = before["pitch"]
+                    note.duration_ms = before["duration_ms"]
+                    note.velocity = before["velocity"]
+                song.duration_ms = duration_before
+
+            _apply()
+            self.push_command("Edit %d notes" % len(prepared), revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def bulk_delete_notes(self, notes) -> None:
+        """Remove several notes at once, as one undo step. Mirrors `delete_note`."""
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            if not isinstance(notes, list) or not notes:
+                raise ValueError("bulk_delete_notes needs a non-empty list of notes")
+            prepared = []
+            for index, item in enumerate(notes):
+                if not isinstance(item, dict):
+                    raise ValueError("note %d is not an object" % index)
+                track, note = self._track_and_note(item.get("track_id"), item.get("note_id"))
+                prepared.append((track, note, track.notes.index(note)))
+
+            def _apply():
+                for track, note, _index in prepared:
+                    if note in track.notes:
+                        track.notes.remove(note)
+
+            def _revert():
+                for track, note, index in prepared:
+                    if note not in track.notes:
+                        track.notes.insert(min(index, len(track.notes)), note)
+
+            _apply()
+            self.push_command("Delete %d notes" % len(prepared), revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+
+    def bulk_create_notes(self, track_id, notes) -> list:
+        """Create several notes on one track at once, as one undo step. Returns their ids.
+
+        The paste path: `Ctrl+V` always lands every copied note on ONE
+        target track, so unlike the two methods above this needs no
+        per-note `track_id`. Kept a separate method from `create_note`
+        rather than a Python loop over it, for the same reason `choose_sound`
+        is its own step rather than a loop over `apply`: a loop would push
+        one undo entry per pasted note, so undoing a ten-note paste would
+        take ten presses of Ctrl+Z instead of one.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            track = self._track_only(track_id)
+            if not isinstance(notes, list) or not notes:
+                raise ValueError("bulk_create_notes needs a non-empty list of notes")
+            prepared = []
+            for index, item in enumerate(notes):
+                if not isinstance(item, dict):
+                    raise ValueError("note %d is not an object" % index)
+                pitch = self._require_midi_value(item.get("pitch"), "pitch")
+                velocity = self._require_midi_value(item.get("velocity", 100), "velocity")
+                start_ms = self._require_ms(item.get("start_ms"), "start_ms", minimum=0)
+                duration_ms = self._require_ms(item.get("duration_ms"), "duration_ms", minimum=1)
+                prepared.append((pitch, velocity, start_ms, duration_ms))
+
+            created = [
+                song_module.Note(
+                    id=song.new_note_id(),
+                    pitch=pitch,
+                    velocity=velocity,
+                    start_ms=start_ms,
+                    duration_ms=duration_ms,
+                )
+                for pitch, velocity, start_ms, duration_ms in prepared
+            ]
+            new_end = max((note.start_ms + note.duration_ms for note in created), default=0)
+            duration_before, duration_after = self._fit_length(new_end)
+
+            def _apply():
+                for note in created:
+                    if note not in track.notes:
+                        track.notes.append(note)
+                song.duration_ms = duration_after
+
+            def _revert():
+                for note in created:
+                    if note in track.notes:
+                        track.notes.remove(note)
+                song.duration_ms = duration_before
+
+            _apply()
+            self.push_command("Paste %d notes" % len(created), revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+            return [note.id for note in created]
+
+    def duplicate_notes(self, items) -> list:
+        """Repeat several notes at once, each onto the track it already lives
+        on, as one undo step. Returns the new notes' ids.
+
+        `bulk_create_notes` above is Ctrl+V's job: aim a clipboard at ONE
+        target track. Ctrl+D's job is different -- repeat a passage that may
+        span several tracks at once (a box-selected multi-instrument phrase)
+        and have every note land back where it came from, not collapse onto
+        whichever track happens to be open. Each item names its own
+        `track_id` for exactly that reason, so a five-track selection
+        creates notes on all five tracks in the one undo step this pushes.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            if not isinstance(items, list) or not items:
+                raise ValueError("duplicate_notes needs a non-empty list of notes")
+            tracks_by_id = {}
+            prepared = []
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    raise ValueError("note %d is not an object" % index)
+                track_id = item.get("track_id")
+                if track_id not in tracks_by_id:
+                    tracks_by_id[track_id] = self._track_only(track_id)
+                pitch = self._require_midi_value(item.get("pitch"), "pitch")
+                velocity = self._require_midi_value(item.get("velocity", 100), "velocity")
+                start_ms = self._require_ms(item.get("start_ms"), "start_ms", minimum=0)
+                duration_ms = self._require_ms(item.get("duration_ms"), "duration_ms", minimum=1)
+                prepared.append((tracks_by_id[track_id], pitch, velocity, start_ms, duration_ms))
+
+            created = [
+                (
+                    track,
+                    song_module.Note(
+                        id=song.new_note_id(),
+                        pitch=pitch,
+                        velocity=velocity,
+                        start_ms=start_ms,
+                        duration_ms=duration_ms,
+                    ),
+                )
+                for track, pitch, velocity, start_ms, duration_ms in prepared
+            ]
+            new_end = max((note.start_ms + note.duration_ms for _track, note in created), default=0)
+            duration_before, duration_after = self._fit_length(new_end)
+
+            def _apply():
+                for track, note in created:
+                    if note not in track.notes:
+                        track.notes.append(note)
+                song.duration_ms = duration_after
+
+            def _revert():
+                for track, note in created:
+                    if note in track.notes:
+                        track.notes.remove(note)
+                song.duration_ms = duration_before
+
+            _apply()
+            self.push_command("Duplicate %d notes" % len(created), revert=_revert, apply=_apply)
+            self._analysis = self._analyze()
+            return [note.id for _track, note in created]
+
     # ---- tracks ----
 
     def create_track(self, name="") -> str:
@@ -897,6 +1127,264 @@ class Session:
                 "stats": self._report(stats),
             }
 
+    def export_midi(self, path) -> dict:
+        """Write the song's current notes and tempo/time-signature map as a `.mid` file.
+
+        A pure export, like `export`/`export_loop` above: nothing here
+        mutates the song, so this is deliberately NOT undo-tracked. Carries
+        notes, track structure and the tempo/time-signature map only -- a
+        `.mid` file has no field for a DOOM sound assignment or a SnapMap
+        pitch/volume expression, so neither survives this path; the project
+        file (`save_project`) is what keeps everything.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            destination = midi_export.write_midi(self._song, path)
+            return {"destination": str(destination)}
+
+    # ---- tempo and time signature (Phase 5) ----
+    #
+    # Both maps started as read-only display data derived once from the
+    # imported `.mid` (`Song.tempo_map`/`Song.time_signature_map`, backed by
+    # `Song.timing`). These six methods are what makes them authorable: each
+    # names a point by TIME rather than by tick -- the unit the panel shows
+    # -- and `_mutate_timing` converts and resequences underneath. Every
+    # tempo-aware reader downstream (the ruler's bar lines, `timeAtTick`/
+    # `tickAtTime`, the Set Song Length modal's bars conversion) keeps working
+    # unchanged: none of them cache the map at import time, they all read
+    # `Song.timing` live through `preview_manifest`'s `self._current_timing()`.
+
+    @staticmethod
+    def _require_bpm(value) -> float:
+        """A tempo in beats per minute, sane enough that a tick conversion
+        never divides toward zero and a `.mid` export never writes a tempo
+        meta event mido would refuse."""
+        if isinstance(value, bool):
+            raise ValueError("%r is not a tempo -- it has to be a BPM from 1 to 999" % (value,))
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = None
+        if number is None or not (1 <= number <= 999):
+            raise ValueError("%r is not a tempo -- it has to be a BPM from 1 to 999" % (value,))
+        return number
+
+    @staticmethod
+    def _require_tick(value) -> int:
+        message = "%r is not a tick -- it has to be a whole number, 0 or more" % (value,)
+        if isinstance(value, bool):
+            raise ValueError(message)
+        try:
+            number = int(value)
+            exact = float(value) == number
+        except (TypeError, ValueError):
+            exact = False
+        if not exact or number < 0:
+            raise ValueError(message)
+        return number
+
+    @staticmethod
+    def _require_numerator(value) -> int:
+        if isinstance(value, bool):
+            raise ValueError(
+                "%r is not a time signature numerator -- it has to be a whole number "
+                "from 1 to 64" % (value,)
+            )
+        try:
+            number = int(value)
+            exact = float(value) == number
+        except (TypeError, ValueError):
+            exact = False
+        if not exact or not (1 <= number <= 64):
+            raise ValueError(
+                "%r is not a time signature numerator -- it has to be a whole number "
+                "from 1 to 64" % (value,)
+            )
+        return number
+
+    @staticmethod
+    def _require_denominator(value) -> int:
+        message = (
+            "%r is not a time signature denominator -- it has to be a power of two "
+            "from 1 to 128 (mido, and therefore MIDI export, cannot write any other kind)"
+            % (value,)
+        )
+        if isinstance(value, bool):
+            raise ValueError(message)
+        try:
+            number = int(value)
+            exact = float(value) == number
+        except (TypeError, ValueError):
+            exact = False
+        if not exact or number not in (1, 2, 4, 8, 16, 32, 64, 128):
+            raise ValueError(message)
+        return number
+
+    def _mutate_timing(self, label: str, mutate) -> None:
+        """Apply a tempo/time-signature edit as one undo step.
+
+        `mutate` receives a WORKING COPY of the song's `timing` dict and
+        edits its `tempo_changes`/`time_signatures` lists in place; nothing
+        it raises can leave the song's real timing half-edited, because the
+        real dict is only ever replaced afterward, in one assignment, once
+        `mutate` has returned successfully. `timing_module.resequence` then
+        derives every `time_ms` and the tempo-derived summary fields from
+        tick positions alone -- the same relationship `music/timing.py::manifest`
+        establishes at import.
+
+        Captured as a whole-dict before/after swap, like `set_loop`'s pair of
+        bounds, rather than as a diff of individual markers: the exact same
+        assignment applies on redo with nothing left to recompute.
+        """
+        with self._lock:
+            if self._song is None:
+                raise ValueError("no song is open -- open a MIDI file first")
+            song = self._song
+            before = copy.deepcopy(song.timing)
+            working = copy.deepcopy(song.timing)
+            mutate(working)
+            timing_module.resequence(working)
+            after = working
+
+            def _apply():
+                song.timing = copy.deepcopy(after)
+
+            def _revert():
+                song.timing = copy.deepcopy(before)
+
+            _apply()
+            self.push_command(label, revert=_revert, apply=_apply)
+
+    def add_tempo_change(self, time_ms, bpm) -> None:
+        """Add a new tempo-change point. One undo step.
+
+        Addressed by time, converted to a tick through the song's OWN clock
+        at the moment of the edit -- the same `tick_at_time` conversion the
+        piano roll's own `tickAtTime` uses, so a point added here lands
+        exactly where the ruler would have put the playhead at that same ms.
+        """
+        time_ms = self._require_ms(time_ms, "time_ms", minimum=0)
+        bpm = self._require_bpm(bpm)
+
+        def _mutate(timing):
+            tick = timing_module.tick_at_time(timing, time_ms)
+            changes = timing.setdefault("tempo_changes", [])
+            if any(int(marker["tick"]) == tick for marker in changes):
+                raise ValueError("a tempo change already exists at %g ms" % time_ms)
+            changes.append(
+                {"tick": tick, "time_ms": float(time_ms), "tempo": round(60_000_000.0 / bpm)}
+            )
+
+        self._mutate_timing("Add tempo change", _mutate)
+
+    def edit_tempo_change(self, tick, time_ms, bpm) -> None:
+        """Move an existing tempo-change point and/or change its BPM. One undo step."""
+        tick = self._require_tick(tick)
+        time_ms = self._require_ms(time_ms, "time_ms", minimum=0)
+        bpm = self._require_bpm(bpm)
+
+        def _mutate(timing):
+            changes = timing.get("tempo_changes") or []
+            target = next((marker for marker in changes if int(marker["tick"]) == tick), None)
+            if target is None:
+                raise ValueError("no tempo change at tick %d" % tick)
+            if tick == 0 and time_ms != 0:
+                raise ValueError(
+                    "the first tempo change has to stay at 0 ms -- a song always starts "
+                    "with a tempo"
+                )
+            new_tick = 0 if tick == 0 else timing_module.tick_at_time(timing, time_ms)
+            if new_tick != tick and any(int(marker["tick"]) == new_tick for marker in changes):
+                raise ValueError("a tempo change already exists at %g ms" % time_ms)
+            target["tick"] = new_tick
+            target["tempo"] = round(60_000_000.0 / bpm)
+
+        self._mutate_timing("Edit tempo change", _mutate)
+
+    def delete_tempo_change(self, tick) -> None:
+        """Remove a tempo-change point. One undo step. The tick-0 point cannot be removed."""
+        tick = self._require_tick(tick)
+
+        def _mutate(timing):
+            if tick == 0:
+                raise ValueError(
+                    "the tempo at 0 ms cannot be deleted -- a song always starts with a tempo"
+                )
+            changes = timing.get("tempo_changes") or []
+            if not any(int(marker["tick"]) == tick for marker in changes):
+                raise ValueError("no tempo change at tick %d" % tick)
+            timing["tempo_changes"] = [marker for marker in changes if int(marker["tick"]) != tick]
+
+        self._mutate_timing("Delete tempo change", _mutate)
+
+    def add_time_signature(self, time_ms, numerator, denominator) -> None:
+        """Add a new time-signature-change point. One undo step."""
+        time_ms = self._require_ms(time_ms, "time_ms", minimum=0)
+        numerator = self._require_numerator(numerator)
+        denominator = self._require_denominator(denominator)
+
+        def _mutate(timing):
+            tick = timing_module.tick_at_time(timing, time_ms)
+            changes = timing.setdefault("time_signatures", [])
+            if any(int(marker["tick"]) == tick for marker in changes):
+                raise ValueError("a time signature already exists at %g ms" % time_ms)
+            changes.append(
+                {
+                    "tick": tick,
+                    "time_ms": float(time_ms),
+                    "numerator": numerator,
+                    "denominator": denominator,
+                }
+            )
+
+        self._mutate_timing("Add time signature", _mutate)
+
+    def edit_time_signature(self, tick, time_ms, numerator, denominator) -> None:
+        """Move an existing time-signature point and/or change its meter. One undo step."""
+        tick = self._require_tick(tick)
+        time_ms = self._require_ms(time_ms, "time_ms", minimum=0)
+        numerator = self._require_numerator(numerator)
+        denominator = self._require_denominator(denominator)
+
+        def _mutate(timing):
+            changes = timing.get("time_signatures") or []
+            target = next((marker for marker in changes if int(marker["tick"]) == tick), None)
+            if target is None:
+                raise ValueError("no time signature at tick %d" % tick)
+            if tick == 0 and time_ms != 0:
+                raise ValueError(
+                    "the first time signature has to stay at 0 ms -- a song always starts "
+                    "with a meter"
+                )
+            new_tick = 0 if tick == 0 else timing_module.tick_at_time(timing, time_ms)
+            if new_tick != tick and any(int(marker["tick"]) == new_tick for marker in changes):
+                raise ValueError("a time signature already exists at %g ms" % time_ms)
+            target["tick"] = new_tick
+            target["numerator"] = numerator
+            target["denominator"] = denominator
+
+        self._mutate_timing("Edit time signature", _mutate)
+
+    def delete_time_signature(self, tick) -> None:
+        """Remove a time-signature point. One undo step. The tick-0 point cannot be removed."""
+        tick = self._require_tick(tick)
+
+        def _mutate(timing):
+            if tick == 0:
+                raise ValueError(
+                    "the time signature at 0 ms cannot be deleted -- a song always starts "
+                    "with a meter"
+                )
+            changes = timing.get("time_signatures") or []
+            if not any(int(marker["tick"]) == tick for marker in changes):
+                raise ValueError("no time signature at tick %d" % tick)
+            timing["time_signatures"] = [
+                marker for marker in changes if int(marker["tick"]) != tick
+            ]
+
+        self._mutate_timing("Delete time signature", _mutate)
+
     # ---- the document ----
 
     def settings(self) -> dict:
@@ -946,7 +1434,16 @@ class Session:
                     self._doc = previous
                     raise
             elif self._song is not None:
-                project.apply_settings(self._song, merged)
+                # Same restore the `reopened` branch does. `_doc` was set to
+                # `merged` above so the projection can read the new choices, but
+                # a projection that raises -- an unknown sound, a bad family --
+                # must leave the session exactly as it was, or every later
+                # save/export reads the document the song was never updated to.
+                try:
+                    project.apply_settings(self._song, merged)
+                except Exception:
+                    self._doc = previous
+                    raise
                 if reread:
                     self._analysis = self._analyze()
             return copy.deepcopy(merged)
@@ -1536,6 +2033,35 @@ class Session:
                 )
                 rulers[channel.key] = analysis.ruler_segments(channel, span, _AXIS)
             return rulers
+
+    def redraw_state(self) -> dict:
+        """The song-derived window snapshot, read under one lock hold.
+
+        The bridge used to assemble its redraw payload from `analysis_dict`,
+        `preview_manifest`, `settings` and `rulers` called one after another,
+        and each took and released the lock on its own. An edit landing on
+        another thread between two of them handed the window a frame mixing
+        before- and after-edit state -- the exact torn read the lock exists to
+        prevent. Taking it once here keeps the four pieces from one instant.
+        The lock is reentrant, so the methods below still take it harmlessly.
+
+        `stats`/`preview` are None when no song is open, matching the bridge's
+        own "no file yet" vs. "a file that compiles to nothing" distinction.
+        """
+        with self._lock:
+            analysis = self.analysis_dict()
+            if analysis is None:
+                preview = None
+                stats = None
+            else:
+                preview, stats = self.preview_manifest(with_stats=True)
+            return {
+                "settings": self.settings(),
+                "analysis": analysis,
+                "rulers": self.rulers(),
+                "stats": stats,
+                "preview": preview,
+            }
 
     # ---- warnings ----
 

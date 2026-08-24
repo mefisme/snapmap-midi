@@ -420,7 +420,14 @@ def from_dict(payload) -> Song:
             raise SongError(
                 "track %r: unknown field(s): %s" % (raw_track.get("id"), ", ".join(unknown))
             )
-        track = Track(**{k: v for k, v in raw_track.items() if k != "notes"})
+        # A MISSING required field falls through `unknown` (which only catches
+        # extra keys) into the constructor as a bare TypeError. A hand-edited or
+        # truncated file is an ordinary event here, so turn it into the module's
+        # own clear error instead of a raw dataclass traceback.
+        try:
+            track = Track(**{k: v for k, v in raw_track.items() if k != "notes"})
+        except TypeError as exc:
+            raise SongError("track %r: %s" % (raw_track.get("id"), exc)) from exc
         for raw_note in raw_track.get("notes") or []:
             if not isinstance(raw_note, dict):
                 raise SongError("a note has to be a JSON object, got %r" % (raw_note,))
@@ -429,7 +436,10 @@ def from_dict(payload) -> Song:
                 raise SongError(
                     "note %r: unknown field(s): %s" % (raw_note.get("id"), ", ".join(unknown))
                 )
-            track.notes.append(Note(**raw_note))
+            try:
+                track.notes.append(Note(**raw_note))
+            except TypeError as exc:
+                raise SongError("note %r: %s" % (raw_note.get("id"), exc)) from exc
         song.tracks.append(track)
     return song
 

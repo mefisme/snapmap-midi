@@ -262,7 +262,10 @@ class SnapMapDocument:
         after it are the targets S fires into, stored as raw ids.
 
         The +1 bias is required: the engine decodes a source as |stored| - 1,
-        so id 0 is representable as -1 and stays distinct from target 0.
+        so the bias keeps the marker for the lowest possible id from clashing
+        with a real target of 0. This method still requires a POSITIVE source --
+        entity ids in a real map are always positive, 0 is never minted (see
+        `next_safe_uid`), and the guard below rejects it.
         Decoded from two saved samples: speaker(62) to listener(63) stores
         [-63, 63] -- which is NOT a self-loop, because 62+1 collides with the
         listener's real id -- and the chain 62,63,64,61 stores

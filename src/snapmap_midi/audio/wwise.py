@@ -727,5 +727,8 @@ def _riff_chunks(wem: bytes) -> tuple:
         elif tag == "data":
             data = wem[cursor + 8 : cursor + 8 + size]
             break
-        cursor += 8 + size
+        # RIFF pads an odd-length chunk to an even boundary. Skipping only
+        # `8 + size` past such a chunk lands one byte short and misaligns every
+        # tag/size read after it, silently losing `fmt `/`data` further on.
+        cursor += 8 + size + (size & 1)
     return fmt, data

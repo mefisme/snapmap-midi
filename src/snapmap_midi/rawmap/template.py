@@ -337,10 +337,19 @@ def _references(uids_with_one_ref) -> dict:
     matters: the engine walks the whole array, not only the part in use.
     """
     ordered = sorted(uids_with_one_ref)
+    # The table only spans [0, REFERENCE_TABLE_WIDTH). A uid at or above it would
+    # silently get no reference slots and the map would fail engine validation
+    # with nothing raised here -- say so loudly instead.
+    if ordered and ordered[-1] >= REFERENCE_TABLE_WIDTH:
+        raise ValueError(
+            "reference uid %d is outside the table width %d"
+            % (ordered[-1], REFERENCE_TABLE_WIDTH)
+        )
+    present = set(ordered)
     ent_keys, running = [], 0
     for uid in range(REFERENCE_TABLE_WIDTH):
         ent_keys.append(running)
-        if uid in ordered:
+        if uid in present:
             running += 1
     return {
         "entityEntRefs": {

@@ -123,7 +123,19 @@ def _levers(args) -> dict:
         if typed is not None:
             levers[keyword] = _DRUMS[typed] if flag == "drums" else typed
     if args.remap:
-        levers["family_overrides"] = dict(kv.split("=", 1) for kv in args.remap.split(","))
+        overrides = {}
+        for kv in args.remap.split(","):
+            if "=" not in kv:
+                # Bare `dict(...)` on this raises a ValueError about "sequence
+                # element length", which is Python internals, not something the
+                # reader typed. Name the offending entry the way the rest of the
+                # CLI's errors do.
+                raise settings_module.SettingsError(
+                    "--remap wants family=family pairs; %r has no '='" % kv
+                )
+            key, value = kv.split("=", 1)
+            overrides[key] = value
+        levers["family_overrides"] = overrides
     return levers
 
 
@@ -132,6 +144,12 @@ def _compile(args) -> int:
     # FileNotFoundError and prints a traceback at someone who mistyped a path.
     if not Path(args.midi).is_file():
         print("no such MIDI file: {}".format(args.midi))
+        return 2
+
+    # Same check for an explicit baseline: `_baseline_bytes` reads it directly,
+    # so a mistyped path would otherwise raise a bare FileNotFoundError traceback.
+    if args.baseline and not Path(args.baseline).is_file():
+        print("no such baseline map: {}".format(args.baseline))
         return 2
 
     try:

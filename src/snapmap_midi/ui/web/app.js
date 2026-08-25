@@ -9,6 +9,9 @@
   var THEME_KEY = 'snapmap_midi_theme';
   var TRACKS_WIDTH_KEY = 'snapmap_midi_tracks_width';
   var OCTAVE_LABEL_KEY = 'snapmap_midi_middle_c_octave';
+  var NOTE_PREVIEW_KEY = 'snapmap_midi_note_preview';
+  var NOTE_PREVIEW_ENABLED = true;
+  var NOTE_PREVIEW_MAX_SECONDS = 0.5;
   var TRACKS_DEFAULT_WIDTH = 314;
   var TRACKS_MIN_WIDTH = 220;
   var ROLL_MIN_WIDTH = 420;
@@ -99,6 +102,33 @@
   var CHANNEL_INSPECTOR_OPEN = false;
   var NOTE_INSPECTOR_OPEN = false;
   var SELECTED_NOTE_ID = null;
+  // Phase 5: whether the piano-roll canvas is in box-select mode. Off by
+  // default -- Phase 2's ordinary click/drag/resize gestures keep working
+  // completely unchanged until this is switched on (see selectModeBtn).
+  var SELECT_MODE = false;
+  // The multi-selection, as a note id -> true map, or null when nothing (or
+  // only one note) is selected -- a PARALLEL structure to SELECTED_NOTE_ID
+  // rather than a replacement for it, so single-note selection never has to
+  // change shape. Only ever holds two or more ids; see setMultiSelection.
+  var MULTI_SELECTED = null;
+  // A box-select drag in progress: {pointer, target, additive, startX,
+  // startY, curX, curY}, all four coordinates in roll CONTENT space (already
+  // offset by the viewport's scroll position), which is what eventGeometry
+  // compares against when called with scrollLeft/scrollTop of 0.
+  var BOX_SELECT = null;
+  // A local-optimistic drag moving every note in the current multi-selection
+  // together, or null. Mirrors NOTE_DRAG's shape and the same
+  // mutate-then-commit-on-pointerup pattern, applied to a batch instead of
+  // one note (see beginBulkNoteDrag).
+  var BULK_DRAG = null;
+  // The in-memory, session/tab-local note clipboard Ctrl+C/Ctrl+V use, or
+  // null. Never persisted to the project file or the backend -- matching
+  // this app's undo/redo, which is session-only for the same reason.
+  var CLIPBOARD = null;
+  // Whether the bulk-edit panel (right-click on a multi-selection) is open,
+  // and which note ids it is currently offering to edit.
+  var BULK_EDIT_OPEN = false;
+  var BULK_EDIT_IDS = [];
   // The part key of a track row currently showing its inline rename field, or
   // null when no row is being renamed. Separate from SELECTED_PART: renaming
   // is a transient text-entry state, not a settings-panel focus.
@@ -152,6 +182,7 @@
   var SAMPLE_PREVIEW_TOKEN = 0;
   var SAMPLE_PREVIEW_BUFFERS = {};
   var SAMPLE_PREVIEW_MODE = null;
+  var NOTE_PREVIEW_SOURCE = null;
 
   var SOUND_BROWSER = {
     open: false,
@@ -431,6 +462,12 @@
     RENDER.palette = null;
     invalidateRollAll();
     queueDraw();
+    // The lanes view has its own per-canvas redraw path (patchLanesView),
+    // separate from the dirty-flag-driven main roll invalidateRollAll()
+    // above covers -- without this it never got told a theme switch happened
+    // at all, on top of the cache-key gap fixed in drawTrackClip/
+    // drawLaneGridFill's own comments.
+    queueLaneDraw();
   }
 
   function initTheme() {
@@ -439,6 +476,34 @@
     setTheme(dark ? 'dark' : 'light', false);
     el('menuLight').addEventListener('click', function () { setTheme('light', true); closeMenus(); });
     el('menuDark').addEventListener('click', function () { setTheme('dark', true); closeMenus(); });
+  }
+
+  /* --------------------------------------- preview-while-editing preference */
+
+  function storedNotePreview() {
+    try {
+      var raw = localStorage.getItem(NOTE_PREVIEW_KEY);
+      return raw === null ? true : raw === '1';
+    } catch (_error) { return true; }
+  }
+
+  function setNotePreviewEnabled(enabled, persist) {
+    NOTE_PREVIEW_ENABLED = !!enabled;
+    el('menuNotePreview').setAttribute('aria-checked', String(NOTE_PREVIEW_ENABLED));
+    if (persist) {
+      try {
+        localStorage.setItem(NOTE_PREVIEW_KEY, NOTE_PREVIEW_ENABLED ? '1' : '0');
+      } catch (_error) { /* local only */ }
+    }
+    if (!NOTE_PREVIEW_ENABLED) { stopNotePreview(); }
+  }
+
+  function initNotePreview() {
+    setNotePreviewEnabled(storedNotePreview(), false);
+    el('menuNotePreview').addEventListener('click', function () {
+      setNotePreviewEnabled(!NOTE_PREVIEW_ENABLED, true);
+      closeMenus();
+    });
   }
 
   /* ---------------------------------------------- pitch-name display convention */
@@ -527,7 +592,7 @@
     var audio = STATE.audio || {};
     [
       'menuSaveProject', 'menuExport', 'menuPlay', 'menuStart',
-      'menuSongLength', 'menuExportLoop', 'menuImportInto'
+      'menuSongLength', 'menuTempoMap', 'menuExportLoop', 'menuImportInto'
     ].forEach(function (id) { el(id).disabled = !song; });
     // Reopening the .mid needs the .mid: a song open with no source file
     // (drawn from nothing, or opened as a project with only hand-drawn
@@ -581,6 +646,19 @@
     // A bare channel number still resolves, for callers that have only that.
     for (var fallback = 0; fallback < list.length; fallback += 1) {
       if (Number(list[fallback].channel) === Number(key)) { return list[fallback]; }
+    }
+    return null;
+  }
+
+  // The song's own track identity, distinct from `partByKey`'s "track:channel"
+  // MIDI identity above -- a note-drag only carries `track_id` (see
+  // `beginNoteDrag`), which is what `move_note`/`resize_note`/etc. address a
+  // note by, so this is the lookup a drag needs to reach the track's own
+  // drum-key table for a percussion preview.
+  function partByTrackId(trackId) {
+    var list = channels();
+    for (var index = 0; index < list.length; index += 1) {
+      if (list[index].track_id === trackId) { return list[index]; }
     }
     return null;
   }
@@ -1338,7 +1416,7 @@
       if (fillCanvas && fillHeight > 0) {
         fillCanvas.style.left = scrollLeft + "px";
         drawLaneGridFill(
-          fillCanvas, visibleWidth, fillHeight, scrollLeft, laneLines, lanePalette
+          fillCanvas, visibleWidth, fillHeight, scrollLeft, contentWidth, laneLines, lanePalette
         );
       }
     }
@@ -2301,14 +2379,23 @@
     }
 
     body.sound = candidate.value;
-    body.pitch_follow = false;
-    body.pitch_follow_preference = false;
-    body.root_midi = null;
+    // On by default: most picks are musical, and following is one click to
+    // undo (or turn off in track settings) for the non-musical minority --
+    // cheaper than the old default, which made every musical pick need the
+    // opposite click instead. Same neutral-root convention `updateSelected-
+    // ChannelPitchFollow` already uses to turn this on from track settings.
+    body.pitch_follow = true;
+    body.pitch_follow_preference = true;
+    body.root_midi = NEUTRAL_ROOT_MIDI;
     body.detected_root_midi = null;
     body.root_confidence = 0;
-    body.root_source = null;
+    body.root_source = "neutral";
     body.fine_tune_cents = 0;
-    toast("Sound selected unchanged. Analyze or tune it only when you want pitch following.");
+    toast(
+      "Sound selected. Follow MIDI note is on, using an assumed " +
+      noteName(NEUTRAL_ROOT_MIDI) + " starting pitch — turn it off in track" +
+      " settings for non-musical sounds."
+    );
     commit();
   }
 
@@ -3380,11 +3467,20 @@
     // A normal render often reaches here only to refresh selection or mixer
     // classes. Pixels are already correct in that case; keep the thumbnail
     // rather than redrawing thousands of rectangles beneath a hidden roll.
+    // `palette` is included by reference: `rollPalette()` returns the SAME
+    // cached object on every call until a theme switch nulls `RENDER.palette`
+    // and forces a fresh one, so comparing identity (not colors) is enough to
+    // notice a theme change cheaply. Without this, switching themes left
+    // every lane's grid and note colors frozen at whatever they were drawn
+    // with last -- stale dark-mode grid lines on a freshly light background,
+    // or the reverse -- until some UNRELATED cache key (zoom, scroll) also
+    // happened to change and forced a real redraw.
     if (!resized && canvas._snapmapClipSource === source &&
         canvas._snapmapClipPart === channel.key &&
         canvas._snapmapClipContentWidth === contentWidth &&
         canvas._snapmapClipScrollLeft === scrollLeft &&
-        canvas._snapmapClipGridKey === laneGridKey()) { return; }
+        canvas._snapmapClipGridKey === laneGridKey() &&
+        canvas._snapmapClipPalette === palette) { return; }
     var context = prepareContext(canvas);
     clearCanvas(context, canvas);
     var duration = Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1);
@@ -3394,6 +3490,7 @@
     canvas._snapmapClipContentWidth = contentWidth;
     canvas._snapmapClipScrollLeft = scrollLeft;
     canvas._snapmapClipGridKey = laneGridKey();
+    canvas._snapmapClipPalette = palette;
     drawLaneTimingGrid(context, lines, width, height, palette);
     if (!events.length) { return; }
     var lowest = Number(channel.lowest);
@@ -3477,17 +3574,29 @@
     context.restore();
   }
 
-  function drawLaneGridFill(canvas, width, height, scrollLeft, lines, palette) {
+  function drawLaneGridFill(canvas, width, height, scrollLeft, contentWidth, lines, palette) {
     if (width < 1 || height < 1) { return; }
     var resized = sizeCanvas(canvas, width, height);
+    // `contentWidth` and `palette` were missing from this cache key entirely
+    // -- a zoom change moves every grid line (more/fewer bars fit per pixel)
+    // without touching scrollLeft, gridKey or height, so this canvas kept
+    // showing lines from whatever zoom level it was last drawn at while
+    // `drawTrackClip` above it (which DOES key on contentWidth) redrew
+    // correctly -- the fill strip below the lanes visibly disagreeing with
+    // the lanes themselves. `palette` closes the same theme-switch gap
+    // `drawTrackClip` has its own comment about, just below.
     if (!resized && canvas._snapmapFillScrollLeft === scrollLeft &&
         canvas._snapmapFillGridKey === laneGridKey() &&
-        canvas._snapmapFillHeight === height) { return; }
+        canvas._snapmapFillHeight === height &&
+        canvas._snapmapFillContentWidth === contentWidth &&
+        canvas._snapmapFillPalette === palette) { return; }
     var context = prepareContext(canvas);
     clearCanvas(context, canvas);
     canvas._snapmapFillScrollLeft = scrollLeft;
     canvas._snapmapFillGridKey = laneGridKey();
     canvas._snapmapFillHeight = height;
+    canvas._snapmapFillContentWidth = contentWidth;
+    canvas._snapmapFillPalette = palette;
     drawLaneTimingGrid(context, lines, width, height, palette);
   }
 
@@ -3654,6 +3763,62 @@
     RENDER.surfaceDirty = false;
   }
 
+  /* ------------------------------------------------ multi-select (Phase 5) */
+
+  // Whatever is selected right now, single or multiple, as one id -> true
+  // map -- or null when nothing is. MULTI_SELECTED wins when it holds
+  // anything; SELECTED_NOTE_ID is Phase 2's own single-note selection, still
+  // exactly as it behaved before this phase whenever no multi-selection
+  // exists.
+  function activeSelectionMap() {
+    if (MULTI_SELECTED) { return MULTI_SELECTED; }
+    if (SELECTED_NOTE_ID) {
+      var single = {};
+      single[SELECTED_NOTE_ID] = true;
+      return single;
+    }
+    return null;
+  }
+
+  function activeSelectionIds() {
+    var map = activeSelectionMap();
+    return map ? Object.keys(map) : [];
+  }
+
+  // Replaces (or, if `additive` and a multi-selection already exists, grows)
+  // the selection. A result of exactly one note collapses back onto
+  // SELECTED_NOTE_ID -- the same single-selection Phase 2 already draws and
+  // targets with Delete -- rather than a one-entry MULTI_SELECTED, so the
+  // two structures never both claim to be the current selection at once.
+  function setMultiSelection(ids, additive) {
+    var next = (additive && MULTI_SELECTED) ? Object.assign({}, MULTI_SELECTED) : {};
+    (ids || []).forEach(function (id) { if (id) { next[id] = true; } });
+    var keys = Object.keys(next);
+    if (keys.length > 1) {
+      MULTI_SELECTED = next;
+      SELECTED_NOTE_ID = null;
+    } else if (keys.length === 1) {
+      MULTI_SELECTED = null;
+      SELECTED_NOTE_ID = keys[0];
+    } else {
+      MULTI_SELECTED = null;
+      SELECTED_NOTE_ID = null;
+    }
+    if (NOTE_INSPECTOR_OPEN) { closeNoteInspector(); }
+    queueDraw();
+  }
+
+  // Escape and clicking empty space both clear whichever selection is
+  // active, single or multiple -- see shortcut()'s Escape chain and
+  // beginCanvasSeek's empty-space fallthrough.
+  function clearAllSelection() {
+    if (!MULTI_SELECTED && !SELECTED_NOTE_ID) { return; }
+    MULTI_SELECTED = null;
+    SELECTED_NOTE_ID = null;
+    if (NOTE_INSPECTOR_OPEN) { closeNoteInspector(); }
+    queueDraw();
+  }
+
   function hoveredRenderEvent(canvas) {
     var point = pianoRollPointer(canvas);
     if (!point) { return null; }
@@ -3708,34 +3873,13 @@
       }
     }
 
-    if (SELECTED_NOTE_ID) {
-      var selectedRecords = eventRenderIndex().records;
-      for (var selectedIndex = 0; selectedIndex < selectedRecords.length; selectedIndex += 1) {
-        var selected = selectedRecords[selectedIndex];
-        if (selected.id !== SELECTED_NOTE_ID) { continue; }
-        var selectedGeometry = eventGeometry(
-          selected,
-          el('pianoRollViewport').scrollLeft,
-          el('pianoRollViewport').scrollTop,
-          Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1)
-        );
-        context.save();
-        context.strokeStyle = palette.accent;
-        context.lineWidth = 2;
-        roundedRectPath(
-          context,
-          selectedGeometry.x + 1,
-          selectedGeometry.y + 1,
-          Math.max(1, selectedGeometry.width - 2),
-          Math.max(1, selectedGeometry.height - 2),
-          Math.max(0, selectedGeometry.radius - 1)
-        );
-        context.stroke();
-        context.restore();
-        break;
-      }
-    }
-
+    // Hovered note fill is drawn BEFORE the selection stroke below, not
+    // after: the pointer sits right on top of whatever was just clicked, so
+    // painting the hover fill on top of an already-drawn selection stroke
+    // buried it until the pointer moved away again -- a click looked like
+    // it had not selected anything until you looked away from the very note
+    // you clicked. Selection now always paints last, so it stays visible
+    // through a hover.
     var hovered = hoveredRenderEvent(el('pianoRoll'));
     if (hovered) {
       var geometry = hovered.geometry;
@@ -3754,6 +3898,66 @@
       shadeCutTail(context, geometry, palette, hovered.record.shortenedBy, true);
       drawNoteLabel(context, hovered.record, geometry, 1, visual.color);
       context.globalAlpha = 1;
+    }
+
+    // The single-note highlight, extended to the whole set for a
+    // multi-selection (Phase 5) -- same geometry helper, just looped instead
+    // of stopping at the first match. A single `palette.accent` stroke used
+    // to disappear on a track whose own note color is also blue-ish (the
+    // accent color IS a blue) -- a halo stroke in the background color
+    // underneath a `palette.text` stroke on top reads against any note
+    // color, not just ones that happen to contrast with accent blue.
+    var selectionMap = activeSelectionMap();
+    if (selectionMap) {
+      var selectedRecords = eventRenderIndex().records;
+      for (var selectedIndex = 0; selectedIndex < selectedRecords.length; selectedIndex += 1) {
+        var selected = selectedRecords[selectedIndex];
+        if (!selectionMap[selected.id]) { continue; }
+        var selectedGeometry = eventGeometry(
+          selected,
+          el('pianoRollViewport').scrollLeft,
+          el('pianoRollViewport').scrollTop,
+          Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1)
+        );
+        context.save();
+        roundedRectPath(
+          context,
+          selectedGeometry.x + 1,
+          selectedGeometry.y + 1,
+          Math.max(1, selectedGeometry.width - 2),
+          Math.max(1, selectedGeometry.height - 2),
+          Math.max(0, selectedGeometry.radius - 1)
+        );
+        context.strokeStyle = palette.field;
+        context.lineWidth = 4;
+        context.stroke();
+        context.strokeStyle = palette.text;
+        context.lineWidth = 1.5;
+        context.stroke();
+        context.restore();
+      }
+    }
+
+    // The rubber-band rectangle a box-select drag is currently drawing.
+    // Coordinates are already in roll content space (see BOX_SELECT's own
+    // comment), so only the current scroll offset needs subtracting.
+    if (BOX_SELECT) {
+      var boxScrollLeft = el('pianoRollViewport').scrollLeft;
+      var boxScrollTop = el('pianoRollViewport').scrollTop;
+      var boxLeft = Math.min(BOX_SELECT.startX, BOX_SELECT.curX) - boxScrollLeft;
+      var boxRight = Math.max(BOX_SELECT.startX, BOX_SELECT.curX) - boxScrollLeft;
+      var boxTop = Math.min(BOX_SELECT.startY, BOX_SELECT.curY) - boxScrollTop;
+      var boxBottom = Math.max(BOX_SELECT.startY, BOX_SELECT.curY) - boxScrollTop;
+      context.save();
+      context.fillStyle = palette.accent;
+      context.globalAlpha = 0.12;
+      context.fillRect(boxLeft, boxTop, boxRight - boxLeft, boxBottom - boxTop);
+      context.globalAlpha = 0.9;
+      context.strokeStyle = palette.accent;
+      context.lineWidth = 1;
+      context.setLineDash([4, 3]);
+      context.strokeRect(boxLeft + 0.5, boxTop + 0.5, boxRight - boxLeft - 1, boxBottom - boxTop - 1);
+      context.restore();
     }
 
     // Where the song currently ends -- also its own drag handle (see
@@ -4034,14 +4238,19 @@
     return 'move';
   }
 
-  // Rewrites the ONE display-event object a hit came from -- the same object
+  // Rewrites ONE display-event object -- the same object
   // `STATE.preview.display_events` already holds, per `record.source` in
   // `eventRenderIndex` -- so the roll redraws instantly without a round trip.
-  // `invalidatePreviewRenderCache` is required, not optional: the render
-  // index copies these fields onto its own records once when built, so a
-  // mutation here is invisible until that cache is thrown away.
-  function applyNoteDragTiming(startMs, durationMs, pitch) {
-    var source = NOTE_DRAG.event;
+  // Grows STATE.preview.duration_ms to match, mirroring the backend's own
+  // auto-grow (`Session._fit_length`): dragging a note past the song's
+  // current end should stretch the roll AS you drag, not only once the
+  // bridge call commits. Only grows here -- never shrinks -- matching the
+  // backend rule exactly. Shared by a single-note drag (applyNoteDragTiming)
+  // and a bulk drag moving several notes at once (updateBulkNoteDrag);
+  // neither invalidates the render cache or redraws itself, since a bulk
+  // drag mutates several of these in one pointermove and only wants one
+  // redraw for the batch.
+  function mutateNoteDragEvent(source, startMs, durationMs, pitch) {
     var end = Math.round(startMs) + Math.max(1, Math.round(durationMs));
     source.start = Math.round(startMs);
     source.end = end;
@@ -4049,17 +4258,43 @@
     source.visual_end = end;
     source.pitch = pitch;
     source.source_pitch = pitch;
-    // Mirrors the backend's own auto-grow (`Session._fit_length`): dragging a
-    // note past the song's current end should stretch the roll AS you drag,
-    // not only once the bridge call commits. Only grows here -- never
-    // shrinks -- matching the backend rule exactly; `revertNoteDrag` is what
-    // puts it back if the drag is undone or abandoned.
     if (STATE.preview && end > (Number(STATE.preview.duration_ms) || 0)) {
       STATE.preview.duration_ms = end;
     }
+    return end;
+  }
+
+  function applyNoteDragTiming(startMs, durationMs, pitch) {
+    var source = NOTE_DRAG.event;
+    mutateNoteDragEvent(source, startMs, durationMs, pitch);
     invalidatePreviewRenderCache();
     queueDraw();
     if (NOTE_INSPECTOR_OPEN && SELECTED_NOTE_ID === source.id) { syncNoteInspector(); }
+    // Only on an actual pitch change -- a resize drag calls this on every
+    // pointermove too, but always with the SAME pitchBase, so it never
+    // retriggers a preview by itself. `revertNoteDrag` also routes through
+    // here, so snapping back to where a drag started plays it once too;
+    // harmless, and simpler than special-casing the revert path for it.
+    if (pitch !== NOTE_DRAG.previewPitchLast) {
+      NOTE_DRAG.previewPitchLast = pitch;
+      if (source.family === "drums") {
+        // Percussion has no single retunable sample -- each key is its own
+        // literal sound (kick, snare, hihat...), so dragging to a new key
+        // has to switch which sample plays, not repitch the one the note
+        // started on. Same resolution order the track-settings drum-key
+        // list already uses (song override, then the user's own saved
+        // default, then the shipped/analyzed fallback for this track).
+        var choice = drumKeyChoice(partByTrackId(NOTE_DRAG.trackId), pitch);
+        previewNoteSound(choice.sound, 1, NOTE_DRAG.previewVolumeBase);
+      } else {
+        var semitones = pitch - NOTE_DRAG.pitchBase;
+        previewNoteSound(
+          NOTE_DRAG.previewSound,
+          NOTE_DRAG.previewRateBase * Math.pow(2, semitones / 12),
+          NOTE_DRAG.previewVolumeBase
+        );
+      }
+    }
   }
 
   // Puts the dragged note's local copy back exactly where it started --
@@ -4098,7 +4333,15 @@
       durationBase: Math.max(1, writtenEnd - (Number(source.start) || 0)),
       anchorTimeMs: positionFromClientX(event.clientX),
       anchorPitch: pitchFromClientY(event.clientY),
-      songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0)
+      songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0),
+      // Captured once, before any drag mutates `source` in place: by the
+      // time a pitch changes mid-drag, `source.pitch`/`.playback_rate` would
+      // already read as the CURRENT dragged-to values, not what they were
+      // resolved against originally, so scaling from them would compound.
+      previewSound: source.sound || null,
+      previewRateBase: Number(source.playback_rate) || 1,
+      previewVolumeBase: Number(source.volume_db) || 0,
+      previewPitchLast: null
     };
     canvas.setPointerCapture(event.pointerId);
     canvas.classList.toggle('note-resize', kind === 'resize' || kind === 'resize-start');
@@ -4172,6 +4415,338 @@
       : (drag.event.start !== drag.startBase || drag.event.pitch !== drag.pitchBase);
     if (!moved) { updateNotePointer(event); return; }
     commitNoteDrag(drag);
+  }
+
+  // ---- box-select and bulk drag (Phase 5) ----
+  //
+  // SELECT_MODE swaps the canvas's empty-space gesture from "scrub-seek" to
+  // "rubber-band select" -- see beginCanvasSeek, which checks it first. A
+  // note already part of a standing multi-selection moves the whole batch
+  // together (beginBulkNoteDrag); any other note click/drag behaves exactly
+  // like Phase 2's single-note gesture, just replacing the selection first.
+
+  function beginBoxSelect(event, additive) {
+    var canvas = el('pianoRoll');
+    var rect = canvas.getBoundingClientRect();
+    var viewport = el('pianoRollViewport');
+    var x = event.clientX - rect.left + viewport.scrollLeft;
+    var y = event.clientY - rect.top + viewport.scrollTop;
+    BOX_SELECT = {
+      pointer: event.pointerId,
+      target: canvas,
+      additive: !!additive,
+      startX: x,
+      startY: y,
+      curX: x,
+      curY: y
+    };
+    canvas.setPointerCapture(event.pointerId);
+  }
+
+  function updateBoxSelect(event) {
+    if (!BOX_SELECT || BOX_SELECT.pointer !== event.pointerId) { return; }
+    var rect = el('pianoRoll').getBoundingClientRect();
+    var viewport = el('pianoRollViewport');
+    BOX_SELECT.curX = event.clientX - rect.left + viewport.scrollLeft;
+    BOX_SELECT.curY = event.clientY - rect.top + viewport.scrollTop;
+    queueDraw();
+  }
+
+  function endBoxSelect(event) {
+    if (!BOX_SELECT || BOX_SELECT.pointer !== event.pointerId) { return; }
+    var box = BOX_SELECT;
+    BOX_SELECT = null;
+    try { box.target.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    if (event.type === 'pointercancel') { queueDraw(); return; }
+    var left = Math.min(box.startX, box.curX);
+    var right = Math.max(box.startX, box.curX);
+    var top = Math.min(box.startY, box.curY);
+    var bottom = Math.max(box.startY, box.curY);
+    if (right - left < 2 && bottom - top < 2) {
+      // A click with no real drag on empty space: clear rather than select
+      // nothing, matching the "clicking empty space clears the selection"
+      // rule shortcut()'s Escape handling already follows.
+      if (!box.additive) { clearAllSelection(); }
+      else { queueDraw(); }
+      return;
+    }
+    var duration = Math.max(1, Number(STATE.preview && STATE.preview.duration_ms) || 1);
+    var records = eventRenderIndex().records;
+    var ids = [];
+    for (var index = 0; index < records.length; index += 1) {
+      var record = records[index];
+      if (!record.id) { continue; }
+      // scrollLeft/scrollTop of 0: the box's own coordinates are already in
+      // content space (see BOX_SELECT's own comment), so geometry has to be
+      // in that same space to compare against it.
+      var geometry = eventGeometry(record, 0, 0, duration);
+      if (geometry.x + geometry.width < left || geometry.x > right) { continue; }
+      if (geometry.y + geometry.height < top || geometry.y > bottom) { continue; }
+      ids.push(record.id);
+    }
+    setMultiSelection(ids, box.additive);
+  }
+
+  function beginBulkNoteDrag(event, leaderId, ids) {
+    var canvas = el('pianoRoll');
+    var entries = [];
+    for (var index = 0; index < ids.length; index += 1) {
+      var note = noteEventById(ids[index]);
+      if (!note || !note.track_id) { continue; }
+      var writtenEnd = Number(
+        note.midi_end !== undefined && note.midi_end !== null ? note.midi_end : note.end
+      );
+      entries.push({
+        event: note,
+        trackId: note.track_id,
+        noteId: note.id,
+        startBase: Number(note.start) || 0,
+        pitchBase: Number(note.pitch) || 0,
+        durationBase: Math.max(1, writtenEnd - (Number(note.start) || 0))
+      });
+    }
+    if (!entries.length) { return; }
+    var leader = noteEventById(leaderId) || entries[0].event;
+    BULK_DRAG = {
+      pointer: event.pointerId,
+      target: canvas,
+      entries: entries,
+      leaderStartBase: Number(leader.start) || 0,
+      leaderPitchBase: Number(leader.pitch) || 0,
+      anchorTimeMs: positionFromClientX(event.clientX),
+      anchorPitch: pitchFromClientY(event.clientY),
+      songLengthBase: Math.round(Number(STATE.preview && STATE.preview.duration_ms) || 0)
+    };
+    canvas.setPointerCapture(event.pointerId);
+  }
+
+  function updateBulkNoteDrag(event) {
+    if (!BULK_DRAG || BULK_DRAG.pointer !== event.pointerId) { return; }
+    var currentTimeMs = positionFromClientXPast(event.clientX, BULK_DRAG.songLengthBase);
+    var currentPitch = pitchFromClientY(event.clientY);
+    // The clicked note is the leader: its own snapped position is what the
+    // whole batch's shift is measured from, so the batch keeps whatever grid
+    // it was already sitting on rather than snapping every note separately
+    // (which could collapse a chord onto one grid line).
+    var rawLeaderStart = BULK_DRAG.leaderStartBase + (currentTimeMs - BULK_DRAG.anchorTimeMs);
+    var deltaTime = snappedTimeMs(rawLeaderStart) - BULK_DRAG.leaderStartBase;
+    var minStart = Math.min.apply(null, BULK_DRAG.entries.map(function (entry) { return entry.startBase; }));
+    deltaTime = Math.max(deltaTime, -minStart);
+    var minPitchBase = Math.min.apply(null, BULK_DRAG.entries.map(function (entry) { return entry.pitchBase; }));
+    var maxPitchBase = Math.max.apply(null, BULK_DRAG.entries.map(function (entry) { return entry.pitchBase; }));
+    var rawDeltaPitch = Math.round(currentPitch - BULK_DRAG.anchorPitch);
+    var deltaPitch = clamp(rawDeltaPitch, -minPitchBase, 127 - maxPitchBase);
+    BULK_DRAG.entries.forEach(function (entry) {
+      mutateNoteDragEvent(
+        entry.event,
+        entry.startBase + deltaTime,
+        entry.durationBase,
+        entry.pitchBase + deltaPitch
+      );
+    });
+    invalidatePreviewRenderCache();
+    queueDraw();
+  }
+
+  function revertBulkNoteDrag(drag) {
+    drag.entries.forEach(function (entry) {
+      mutateNoteDragEvent(entry.event, entry.startBase, entry.durationBase, entry.pitchBase);
+    });
+    if (STATE.preview && drag.songLengthBase !== undefined) {
+      STATE.preview.duration_ms = drag.songLengthBase;
+    }
+    invalidatePreviewRenderCache();
+  }
+
+  function commitBulkNoteDrag(drag) {
+    if (!api()) { revertBulkNoteDrag(drag); queueDraw(); return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Moving ' + drag.entries.length + ' notes...');
+    var edits = drag.entries.map(function (entry) {
+      return {
+        track_id: entry.trackId,
+        note_id: entry.noteId,
+        start_ms: Math.round(entry.event.start),
+        pitch: Math.round(entry.event.pitch)
+      };
+    });
+    api().bulk_edit_notes(edits).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); revertBulkNoteDrag(drag); render(); return; }
+      adopt(response, sequence);
+      render();
+    }, function (error) {
+      setBusy(false);
+      fail(error);
+      revertBulkNoteDrag(drag);
+      render();
+    });
+  }
+
+  function endBulkNoteDrag(event) {
+    if (!BULK_DRAG || BULK_DRAG.pointer !== event.pointerId) { return; }
+    var drag = BULK_DRAG;
+    BULK_DRAG = null;
+    try { drag.target.releasePointerCapture(event.pointerId); } catch (_error) { /* already released */ }
+    if (event.type === 'pointercancel') { revertBulkNoteDrag(drag); queueDraw(); return; }
+    var moved = drag.entries.some(function (entry) {
+      return Math.round(entry.event.start) !== entry.startBase ||
+        Math.round(entry.event.pitch) !== entry.pitchBase;
+    });
+    if (!moved) { queueDraw(); return; }
+    commitBulkNoteDrag(drag);
+  }
+
+  // Delete/Backspace's target, and the bulk-edit panel's own Delete button:
+  // several notes at once through one bridge call and one undo entry, or the
+  // single-note path unchanged when the active selection is just one note.
+  function bulkDeleteNoteIds(ids) {
+    var notes = ids.map(function (id) {
+      var note = noteEventById(id);
+      return note && note.track_id ? { track_id: note.track_id, note_id: note.id } : null;
+    }).filter(function (entry) { return entry; });
+    if (!notes.length || !api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Deleting ' + notes.length + ' notes...');
+    api().bulk_delete_notes(notes).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); render(); return; }
+      adopt(response, sequence);
+      closeBulkEditMenu();
+      clearAllSelection();
+      render();
+    }, function (error) { setBusy(false); fail(error); render(); });
+  }
+
+  function deleteSelection() {
+    var ids = activeSelectionIds();
+    if (ids.length > 1) { bulkDeleteNoteIds(ids); return; }
+    deleteSelectedNote();
+  }
+
+  // ---- copy/paste (Phase 5) ----
+  //
+  // Session/tab-local only, like undo/redo -- never written to the project
+  // file or the backend. Ctrl+C copies the current selection (single or
+  // multi, whichever is active); Ctrl+V creates fresh notes on the paste
+  // target track through one bulk_create_notes call, one undo entry.
+
+  function copySelection() {
+    var ids = activeSelectionIds();
+    if (!ids.length) { return; }
+    var notes = ids.map(noteEventById).filter(function (note) { return note && note.track_id; });
+    if (!notes.length) { return; }
+    var earliestStart = Math.min.apply(null, notes.map(function (note) { return Number(note.start) || 0; }));
+    CLIPBOARD = {
+      originTrackId: notes[0].track_id,
+      earliestStart: Math.round(earliestStart),
+      notes: notes.map(function (note) {
+        var writtenEnd = Number(
+          note.midi_end !== undefined && note.midi_end !== null ? note.midi_end : note.end
+        );
+        return {
+          pitch: Math.round(Number(note.pitch) || 0),
+          velocity: Math.round(Number(note.velocity) || 0),
+          offsetMs: Math.round((Number(note.start) || 0) - earliestStart),
+          durationMs: Math.max(1, Math.round(writtenEnd - (Number(note.start) || 0)))
+        };
+      })
+    };
+    stamp(CLIPBOARD.notes.length + (CLIPBOARD.notes.length === 1 ? ' note copied' : ' notes copied'));
+  }
+
+  // The currently open/selected track, if there is one to read -- see
+  // ROLL_PART/SELECTED_PART's own comments near the top of the file. Falls
+  // back to wherever the clipboard's own notes came from, so a paste with
+  // nothing else open still lands somewhere sensible.
+  function pasteTargetTrackId() {
+    if (ROLL_PART && !ROLL_GLOBAL) {
+      var focused = partByKey(ROLL_PART);
+      if (focused && focused.track_id) { return focused.track_id; }
+    }
+    if (SELECTED_PART) {
+      var settingsFocused = partByKey(SELECTED_PART);
+      if (settingsFocused && settingsFocused.track_id) { return settingsFocused.track_id; }
+    }
+    if (CLIPBOARD && CLIPBOARD.originTrackId) {
+      var stillExists = channels().some(function (channel) {
+        return channel.track_id === CLIPBOARD.originTrackId;
+      });
+      if (stillExists) { return CLIPBOARD.originTrackId; }
+    }
+    return null;
+  }
+
+  function pasteClipboard() {
+    if (!CLIPBOARD || !CLIPBOARD.notes.length || !api()) { return; }
+    var trackId = pasteTargetTrackId();
+    if (!trackId) { toast('No track to paste onto -- open a track first.', 'warn'); return; }
+    var playhead = Math.round(currentPosition());
+    var landing = playhead;
+    if (trackId === CLIPBOARD.originTrackId && playhead === CLIPBOARD.earliestStart) {
+      // The playhead has not moved since the copy: landing exactly there
+      // would paste directly on top of what was just copied. One bar
+      // forward is a visible, deliberate offset instead.
+      landing = CLIPBOARD.earliestStart + msFromBars(1);
+    }
+    var notes = CLIPBOARD.notes.map(function (note) {
+      return {
+        pitch: note.pitch,
+        velocity: note.velocity,
+        start_ms: Math.max(0, Math.round(landing + note.offsetMs)),
+        duration_ms: note.durationMs
+      };
+    });
+    var sequence = nextRequest();
+    setBusy(true, 'Pasting ' + notes.length + ' notes...');
+    api().bulk_create_notes(trackId, notes).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      setMultiSelection(response.note_ids || [], false);
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  // Ctrl+D repeats the current selection right after itself, on the SAME
+  // track each note already lives on -- unlike copy/paste, which aims one
+  // target track, a box-selected multi-track phrase (the merged "All
+  // tracks" roll makes this selectable) duplicates every note back onto its
+  // own track, so a whole passage repeats as one unit. Never touches
+  // CLIPBOARD, so it cannot disturb a pending copy.
+  function duplicateSelection() {
+    var ids = activeSelectionIds();
+    if (!ids.length || !api()) { return; }
+    var notes = ids.map(noteEventById).filter(function (note) { return note && note.track_id; });
+    if (!notes.length) { return; }
+    var writtenEnd = function (note) {
+      return Number(
+        note.midi_end !== undefined && note.midi_end !== null ? note.midi_end : note.end
+      );
+    };
+    var earliestStart = Math.min.apply(
+      null, notes.map(function (note) { return Number(note.start) || 0; })
+    );
+    var latestEnd = Math.max.apply(null, notes.map(writtenEnd));
+    var span = Math.max(1, Math.round(latestEnd - earliestStart));
+    var items = notes.map(function (note) {
+      return {
+        track_id: note.track_id,
+        pitch: Math.round(Number(note.pitch) || 0),
+        velocity: Math.round(Number(note.velocity) || 0),
+        start_ms: Math.max(0, Math.round((Number(note.start) || 0) + span)),
+        duration_ms: Math.max(1, Math.round(writtenEnd(note) - (Number(note.start) || 0)))
+      };
+    });
+    var sequence = nextRequest();
+    setBusy(true, 'Duplicating ' + items.length + (items.length === 1 ? ' note...' : ' notes...'));
+    api().duplicate_notes(items).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      setMultiSelection(response.note_ids || [], false);
+    }, function (error) { setBusy(false); fail(error); });
   }
 
   // ---- the loop brace, its own strip below the ruler (Phase 3) ----
@@ -4359,6 +4934,23 @@
     if (!hasSong()) { return; }
     NOTE_POINTER = { clientX: event.clientX, clientY: event.clientY };
     var hit = hoveredRenderEvent(el("pianoRoll"));
+    if (SELECT_MODE) {
+      if (hit && hit.record && hit.record.id) {
+        event.preventDefault();
+        pausePlayback();
+        var selected = activeSelectionIds();
+        if (selected.length > 1 && selected.indexOf(hit.record.id) !== -1) {
+          beginBulkNoteDrag(event, hit.record.id, selected);
+        } else {
+          setMultiSelection([hit.record.id], false);
+          beginNoteDrag(event, hit, noteEdgeZone(hit));
+        }
+        return;
+      }
+      event.preventDefault();
+      beginBoxSelect(event, event.shiftKey);
+      return;
+    }
     if (hit && hit.record && hit.record.id) {
       event.preventDefault();
       pausePlayback();
@@ -4371,6 +4963,10 @@
       beginSongLengthDrag(event);
       return;
     }
+    // Empty space, no gesture claimed it: clear whatever was selected before
+    // falling through to the ordinary scrub-seek, matching how Escape
+    // already clears a selection (see shortcut()).
+    clearAllSelection();
     beginTimelineSeek(event, true);
   }
 
@@ -4380,6 +4976,14 @@
   }
 
   function moveCanvasSeek(event) {
+    if (BULK_DRAG && BULK_DRAG.pointer === event.pointerId) {
+      updateBulkNoteDrag(event);
+      return;
+    }
+    if (BOX_SELECT && BOX_SELECT.pointer === event.pointerId) {
+      updateBoxSelect(event);
+      return;
+    }
     if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
       if (NOTE_DRAG.kind === 'resize') { updateNoteDragResize(event); }
       else if (NOTE_DRAG.kind === 'resize-start') { updateNoteDragResizeStart(event); }
@@ -4396,6 +5000,14 @@
   }
 
   function endCanvasSeek(event) {
+    if (BULK_DRAG && BULK_DRAG.pointer === event.pointerId) {
+      endBulkNoteDrag(event);
+      return;
+    }
+    if (BOX_SELECT && BOX_SELECT.pointer === event.pointerId) {
+      endBoxSelect(event);
+      return;
+    }
     if (NOTE_DRAG && NOTE_DRAG.pointer === event.pointerId) {
       endNoteDrag(event);
       return;
@@ -4448,6 +5060,23 @@
     return Math.max(1, Math.round(timeAtTick(gridTicks) - timeAtTick(0)));
   }
 
+  // Finds the just-created note among the freshly adopted preview events by
+  // position rather than id -- `create_note` does not hand one back -- so a
+  // second note drawn at the exact same track/start/pitch before this one's
+  // response lands could in principle match the wrong one; harmless here,
+  // since both would resolve to the same sound and pitch anyway.
+  function resolvedEventAt(trackId, pitch, startMs) {
+    var events = previewDisplayEvents();
+    for (var index = 0; index < events.length; index += 1) {
+      var event = events[index];
+      if (event.track_id === trackId && Number(event.pitch) === pitch &&
+          Math.round(Number(event.start) || 0) === Math.round(startMs)) {
+        return event;
+      }
+    }
+    return null;
+  }
+
   function createNoteAt(trackId, pitch, startMs, durationMs) {
     if (!api()) { return; }
     var sequence = nextRequest();
@@ -4458,6 +5087,10 @@
         if (!response || !response.ok) { fail(response); render(); return; }
         adopt(response, sequence);
         render();
+        var placed = resolvedEventAt(trackId, pitch, startMs);
+        if (placed) {
+          previewNoteSound(placed.sound, Number(placed.playback_rate) || 1, placed.volume_db);
+        }
       },
       function (error) { setBusy(false); fail(error); render(); }
     );
@@ -6461,6 +7094,49 @@
     }
   }
 
+  function stopNotePreview() {
+    var source = NOTE_PREVIEW_SOURCE;
+    NOTE_PREVIEW_SOURCE = null;
+    if (source) {
+      try { source.stop(); } catch (_error) { /* already ended */ }
+    }
+  }
+
+  // A short, monophonic audition for drawing/dragging a note (Options >
+  // Preview Notes While Editing) -- deliberately NOT `scheduleEvent`'s full
+  // attack/glide/sustain modeling, which is built around the transport's own
+  // running clock (`when`, `audiblePosition`) rather than an ad-hoc trigger.
+  // Silent if the buffer is not already decoded rather than fetching one:
+  // this fires on every pointermove that changes pitch during a drag, so
+  // waiting on a network round trip would make the sound lag behind the
+  // pointer instead of tracking it. A new preview always cuts the previous
+  // one -- dragging through a run of pitches should sound like one voice
+  // sliding, not a pile of overlapping tails.
+  function previewNoteSound(soundName, playbackRate, volumeDb) {
+    if (!NOTE_PREVIEW_ENABLED || !soundName) { return; }
+    var buffer = AUDIO.buffers[soundName];
+    if (!buffer) { return; }
+    var context;
+    try { context = ensureAudioContext(); } catch (_error) { return; }
+    stopNotePreview();
+    context.resume().catch(function () { /* stays suspended until a real gesture resumes it */ });
+    var rate = Math.max(0.05, Number(playbackRate) || 1);
+    var source = context.createBufferSource();
+    var gain = context.createGain();
+    source.buffer = buffer;
+    source.playbackRate.value = rate;
+    gain.gain.value = 0.34 * Math.pow(10, Number(volumeDb || 0) / 20);
+    source.connect(gain);
+    gain.connect(AUDIO.master);
+    NOTE_PREVIEW_SOURCE = source;
+    source.onended = function () {
+      if (NOTE_PREVIEW_SOURCE === source) { NOTE_PREVIEW_SOURCE = null; }
+    };
+    source.start();
+    var cap = Math.max(0.05, Math.min(buffer.duration / rate, NOTE_PREVIEW_MAX_SECONDS));
+    try { source.stop(context.currentTime + cap); } catch (_error) { /* already ended */ }
+  }
+
   function stopSamplePreview() {
     SAMPLE_PREVIEW_TOKEN += 1;
     var source = SAMPLE_PREVIEW_SOURCE;
@@ -7115,6 +7791,111 @@
     queueDraw();
   }
 
+  /* ------------------------------------------------- bulk edit (Phase 5) */
+
+  function toggleSelectMode() {
+    if (!hasSong()) { return; }
+    SELECT_MODE = !SELECT_MODE;
+    el("selectModeBtn").setAttribute("aria-pressed", String(SELECT_MODE));
+    if (!SELECT_MODE) { clearAllSelection(); }
+    queueDraw();
+  }
+
+  function closeBulkEditMenu() {
+    BULK_EDIT_OPEN = false;
+    BULK_EDIT_IDS = [];
+    el("bulkEditInspector").hidden = true;
+  }
+
+  function openBulkEditMenu(ids) {
+    closeInspector();
+    closeNotifications();
+    closeChannelInspector();
+    closeNoteInspector();
+    BULK_EDIT_OPEN = true;
+    BULK_EDIT_IDS = ids.slice();
+    el("bulkEditSubtitle").textContent = ids.length + (ids.length === 1 ? " note selected" : " notes selected");
+    ["Velocity", "Pitch", "Start", "Duration"].forEach(function (name) {
+      el("bulk" + name + "Enabled").checked = false;
+      setDependent("bulk" + name + "Controls", false);
+    });
+    el("bulkVelocityDelta").value = "0";
+    el("bulkPitchDelta").value = "0";
+    el("bulkStartDelta").value = "0";
+    el("bulkDurationRatio").value = "1";
+    el("bulkEditInspector").hidden = false;
+  }
+
+  // Every field is opt-in: unchecked means "do not touch this property on
+  // any note in the selection" -- see the panel's own help text. Absolute
+  // new values are computed here, per note, from each note's OWN current
+  // value plus the one shared delta/ratio, and sent as a single
+  // bulk_edit_notes batch so the backend validates and applies them exactly
+  // like a bulk drag does, in one undo step.
+  function applyBulkEdit() {
+    if (!api() || !BULK_EDIT_IDS.length) { return; }
+    var velocityOn = el("bulkVelocityEnabled").checked;
+    var pitchOn = el("bulkPitchEnabled").checked;
+    var startOn = el("bulkStartEnabled").checked;
+    var durationOn = el("bulkDurationEnabled").checked;
+    if (!velocityOn && !pitchOn && !startOn && !durationOn) {
+      toast("Check at least one field to change before applying.", "warn");
+      return;
+    }
+    var velocityDelta = Math.round(Number(el("bulkVelocityDelta").value) || 0);
+    var pitchDelta = Math.round(Number(el("bulkPitchDelta").value) || 0);
+    var startDelta = Math.round(Number(el("bulkStartDelta").value) || 0);
+    var durationRatio = Math.max(0.01, Number(el("bulkDurationRatio").value) || 1);
+    var edits = [];
+    BULK_EDIT_IDS.forEach(function (id) {
+      var note = noteEventById(id);
+      if (!note || !note.track_id) { return; }
+      var edit = { track_id: note.track_id, note_id: note.id };
+      if (velocityOn) {
+        edit.velocity = clamp(Math.round(Number(note.velocity) || 0) + velocityDelta, 0, 127);
+      }
+      if (pitchOn) {
+        edit.pitch = clamp(Math.round(Number(note.pitch) || 0) + pitchDelta, 0, 127);
+      }
+      if (startOn) {
+        edit.start_ms = Math.max(0, Math.round(Number(note.start) || 0) + startDelta);
+      }
+      if (durationOn) {
+        var writtenEnd = Number(
+          note.midi_end !== undefined && note.midi_end !== null ? note.midi_end : note.end
+        );
+        var currentDuration = Math.max(1, writtenEnd - (Number(note.start) || 0));
+        edit.duration_ms = Math.max(1, Math.round(currentDuration * durationRatio));
+      }
+      edits.push(edit);
+    });
+    if (!edits.length) { return; }
+    var sequence = nextRequest();
+    setBusy(true, "Editing " + edits.length + " notes...");
+    api().bulk_edit_notes(edits).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      closeBulkEditMenu();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function deleteBulkSelection() {
+    bulkDeleteNoteIds(BULK_EDIT_IDS);
+  }
+
+  function initBulkEditInspector() {
+    el("closeBulkEditInspector").addEventListener("click", function () { closeBulkEditMenu(); });
+    ["Velocity", "Pitch", "Start", "Duration"].forEach(function (name) {
+      el("bulk" + name + "Enabled").addEventListener("change", function () {
+        setDependent("bulk" + name + "Controls", this.checked);
+      });
+    });
+    el("bulkApplyButton").addEventListener("click", applyBulkEdit);
+    el("bulkDeleteButton").addEventListener("click", deleteBulkSelection);
+  }
+
   function updateNoteOverride(noteId, key, rawValue) {
     if (!STATE.settings || !noteId || !key) { return; }
     var pitchKey = key === "pitch_semitones" || key === "follow_pitch_semitones";
@@ -7421,6 +8202,26 @@
     }, function (error) { setBusy(false); fail(error); });
   }
 
+  // Writes a standard `.mid` file, separate from both exports above: those
+  // author a DOOM `rawmap.json`, this authors notes, track structure and the
+  // tempo/time-signature map only -- the "share with anyone, any DAW" path,
+  // where the project file (Save Project) is "share with another
+  // snapmap-midi user, keep everything." A pure export, not undo-tracked,
+  // same as exportMap/exportLoop.
+  function exportMidi() {
+    closeMenus();
+    if (!api() || !hasSong()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Exporting MIDI...');
+    api().export_midi().then(function (response) {
+      setBusy(false);
+      if (!response || (!response.ok && !response.cancelled)) { fail(response); return; }
+      if (!response.ok) { return; }
+      toast('MIDI exported to ' + response.destination, 'ok');
+      stamp(baseName(response.destination));
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
   // The transport's "Loop playback" switch. Not a settings-document patch --
   // loop_enabled lives on the Song, not the levers apply_settings projects --
   // so this calls its own bridge method directly, the same way commitLoop
@@ -7545,6 +8346,230 @@
       if (event.key === 'Enter') { event.preventDefault(); commitSongLength(); }
       else if (event.key === 'Escape') { event.preventDefault(); closeSongLengthModal(); }
     });
+  }
+
+  /* ------------------------------------------- tempo & time signature (Phase 5) */
+  //
+  // `tempoBox`/`playback_speed` (above) is an AUDITION multiplier layered on
+  // top of the song's own tempo map; this modal edits that map itself.
+  // Reads `STATE.preview.timing` -- already sent with every redraw, at speed
+  // 1.0 -- the same source the ruler's own bar lines and `timeAtTick`/
+  // `tickAtTime` already read, so an edit here is visible on the roll the
+  // moment the bridge answers, with no separate payload plumbing needed.
+
+  function tempoMapTiming() {
+    return (STATE.preview && STATE.preview.timing) || {};
+  }
+
+  function tempoPointRow(marker, isFirst, onCommit, onDelete) {
+    var row = document.createElement('div');
+    row.className = 'tempo-point-row' + (isFirst ? ' tempo-point-first' : '');
+
+    var timeInput = document.createElement('input');
+    timeInput.type = 'number';
+    timeInput.min = '0';
+    timeInput.step = '1';
+    timeInput.className = 'mono';
+    timeInput.value = String(Math.round(Number(marker.time_ms) || 0));
+    timeInput.disabled = isFirst;
+    timeInput.title = isFirst ? 'The first point always starts at 0 ms' : 'Time, in milliseconds';
+    row.appendChild(timeInput);
+
+    var fields = onCommit.fields(marker);
+    fields.forEach(function (field) { row.appendChild(field); });
+
+    var unit = document.createElement('span');
+    unit.className = 'unit';
+    unit.textContent = 'ms';
+    row.insertBefore(unit, fields[0] || null);
+
+    function commit() { onCommit.run(marker.tick, timeInput.value, fields); }
+    timeInput.addEventListener('change', commit);
+    fields.forEach(function (field) { field.addEventListener('change', commit); });
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn icon';
+    remove.title = isFirst ? 'The first point cannot be removed' : 'Remove this point';
+    remove.disabled = isFirst;
+    remove.appendChild(iconElement('trash'));
+    remove.addEventListener('click', function () { onDelete(marker.tick); });
+    row.appendChild(remove);
+
+    return row;
+  }
+
+  function renderTempoMapLists() {
+    if (el('tempoMapOverlay').hidden) { return; }
+    var timing = tempoMapTiming();
+
+    var tempoHost = el('tempoPointList');
+    tempoHost.textContent = '';
+    var tempoChanges = (timing.tempo_changes || []).slice()
+      .sort(function (left, right) { return left.tick - right.tick; });
+    tempoChanges.forEach(function (marker, index) {
+      tempoHost.appendChild(tempoPointRow(marker, index === 0, {
+        fields: function (m) {
+          var bpm = document.createElement('input');
+          bpm.type = 'number';
+          bpm.min = '1';
+          bpm.max = '999';
+          bpm.step = '0.01';
+          bpm.className = 'mono';
+          bpm.value = compactNumber(60000000 / (Number(m.tempo) || 500000), 2);
+          return [bpm];
+        },
+        run: function (tick, timeMs, fields) { commitTempoPointEdit(tick, timeMs, fields[0].value); }
+      }, deleteTempoPoint));
+    });
+
+    var signatureHost = el('timeSignaturePointList');
+    signatureHost.textContent = '';
+    var signatures = (timing.time_signatures || []).slice()
+      .sort(function (left, right) { return left.tick - right.tick; });
+    signatures.forEach(function (marker, index) {
+      signatureHost.appendChild(tempoPointRow(marker, index === 0, {
+        fields: function (m) {
+          var numerator = document.createElement('input');
+          numerator.type = 'number';
+          numerator.min = '1';
+          numerator.max = '64';
+          numerator.step = '1';
+          numerator.className = 'mono';
+          numerator.value = String(Math.round(Number(m.numerator) || 4));
+          var slash = document.createElement('span');
+          slash.className = 'unit';
+          slash.textContent = '/';
+          var denominator = document.createElement('select');
+          [1, 2, 4, 8, 16, 32, 64].forEach(function (value) {
+            var option = document.createElement('option');
+            option.value = String(value);
+            option.textContent = String(value);
+            if (Number(m.denominator) === value) { option.selected = true; }
+            denominator.appendChild(option);
+          });
+          return [numerator, slash, denominator];
+        },
+        run: function (tick, timeMs, fields) {
+          commitTimeSignaturePointEdit(tick, timeMs, fields[0].value, fields[2].value);
+        }
+      }, deleteTimeSignaturePoint));
+    });
+  }
+
+  function commitTempoPointEdit(tick, timeMs, bpm) {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Updating tempo...');
+    api().edit_tempo_change(tick, Math.round(Number(timeMs) || 0), Number(bpm) || 120).then(
+      function (response) {
+        setBusy(false);
+        if (!response || !response.ok) { fail(response); renderTempoMapLists(); return; }
+        adopt(response, sequence);
+        render();
+        renderTempoMapLists();
+      },
+      function (error) { setBusy(false); fail(error); renderTempoMapLists(); }
+    );
+  }
+
+  function deleteTempoPoint(tick) {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Removing tempo change...');
+    api().delete_tempo_change(tick).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      renderTempoMapLists();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function addTempoPoint() {
+    if (!api()) { return; }
+    var timeMs = Math.max(0, Math.round(Number(el('tempoAddTime').value) || 0));
+    var bpm = Number(el('tempoAddBpm').value) || 120;
+    var sequence = nextRequest();
+    setBusy(true, 'Adding tempo change...');
+    api().add_tempo_change(timeMs, bpm).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      renderTempoMapLists();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function commitTimeSignaturePointEdit(tick, timeMs, numerator, denominator) {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Updating time signature...');
+    api().edit_time_signature(
+      tick, Math.round(Number(timeMs) || 0), Number(numerator) || 4, Number(denominator) || 4
+    ).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); renderTempoMapLists(); return; }
+      adopt(response, sequence);
+      render();
+      renderTempoMapLists();
+    }, function (error) { setBusy(false); fail(error); renderTempoMapLists(); });
+  }
+
+  function deleteTimeSignaturePoint(tick) {
+    if (!api()) { return; }
+    var sequence = nextRequest();
+    setBusy(true, 'Removing time signature...');
+    api().delete_time_signature(tick).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      renderTempoMapLists();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function addTimeSignaturePoint() {
+    if (!api()) { return; }
+    var timeMs = Math.max(0, Math.round(Number(el('timeSignatureAddTime').value) || 0));
+    var numerator = Number(el('timeSignatureAddNumerator').value) || 4;
+    var denominator = Number(el('timeSignatureAddDenominator').value) || 4;
+    var sequence = nextRequest();
+    setBusy(true, 'Adding time signature...');
+    api().add_time_signature(timeMs, numerator, denominator).then(function (response) {
+      setBusy(false);
+      if (!response || !response.ok) { fail(response); return; }
+      adopt(response, sequence);
+      render();
+      renderTempoMapLists();
+    }, function (error) { setBusy(false); fail(error); });
+  }
+
+  function openTempoMapModal() {
+    closeMenus();
+    if (!hasSong()) { return; }
+    el('tempoAddTime').value = '0';
+    el('tempoAddBpm').value = '120';
+    el('timeSignatureAddTime').value = '0';
+    el('timeSignatureAddNumerator').value = '4';
+    el('timeSignatureAddDenominator').value = '4';
+    el('tempoMapOverlay').hidden = false;
+    renderTempoMapLists();
+  }
+
+  function closeTempoMapModal() {
+    el('tempoMapOverlay').hidden = true;
+  }
+
+  function initTempoMapModal() {
+    el('menuTempoMap').addEventListener('click', openTempoMapModal);
+    el('tempoMapClose').addEventListener('click', closeTempoMapModal);
+    el('tempoMapDone').addEventListener('click', closeTempoMapModal);
+    el('tempoMapOverlay').addEventListener('pointerdown', function (event) {
+      if (event.target === this) { closeTempoMapModal(); }
+    });
+    el('tempoAddButton').addEventListener('click', addTempoPoint);
+    el('timeSignatureAddButton').addEventListener('click', addTimeSignaturePoint);
   }
 
   function undoLastEdit() {
@@ -7984,12 +9009,14 @@
     el('workspace').hidden = MIDI_LOADING || !song;
     el('songName').textContent = song ? (baseName(STATE.settings.midi) || 'Untitled Song') : '';
     el('menuExport').disabled = !song;
+    el('menuExportMidi').disabled = !song;
     el('exportBtn').disabled = !song;
     el('addTrackBtn').disabled = !song;
     el('gridResolution').disabled = !song;
     el('timeSignature').disabled = !song;
     el('rollZoom').disabled = !song;
     el('globalRollToggle').disabled = !song;
+    el('selectModeBtn').disabled = !song;
     el('masterVolume').disabled = !song;
     syncMasterVolume();
     syncTempoBox();
@@ -8028,9 +9055,11 @@
       else if (OPEN_TRACK_MENU_KEY) { closeTrackMenu(); }
       else if (ROLL_PART || ROLL_GLOBAL) { event.preventDefault(); closeDetailedRoll(); }
       else if (NOTIFICATIONS_OPEN) { closeNotifications(); }
+      else if (BULK_EDIT_OPEN) { closeBulkEditMenu(); clearAllSelection(); }
       else if (NOTE_INSPECTOR_OPEN) { closeNoteInspector(); }
       else if (CHANNEL_INSPECTOR_OPEN) { closeChannelInspector(); }
       else if (INSPECTOR_OPEN) { closeInspector(); }
+      else if (MULTI_SELECTED || SELECTED_NOTE_ID) { clearAllSelection(); }
       return;
     }
     if (SOUND_BROWSER.open) { return; }
@@ -8045,6 +9074,13 @@
       else if (key === 'z') { event.preventDefault(); undoLastEdit(); }
       else if (key === 'y') { event.preventDefault(); redoLastEdit(); }
       else if (event.key === ',') { event.preventDefault(); openInspector(); }
+      // Copy/paste stay out of the way of an ordinary text/number field's own
+      // clipboard use -- the same `editing` guard Home and Delete already
+      // apply below, checked here too since Ctrl+C/Ctrl+V never reach that
+      // code otherwise (this block returns unconditionally).
+      else if (key === 'c') { if (!editing && activeSelectionIds().length) { event.preventDefault(); copySelection(); } }
+      else if (key === 'v') { if (!editing && CLIPBOARD) { event.preventDefault(); pasteClipboard(); } }
+      else if (key === 'd') { if (!editing && activeSelectionIds().length) { event.preventDefault(); duplicateSelection(); } }
       return;
     }
     if (!typing && event.code === 'Space') { event.preventDefault(); togglePlayback(); }
@@ -8052,9 +9088,9 @@
     // Only when a note is actually selected and nothing is mid-edit in a
     // field -- the same guard Space already uses, so Delete still deletes
     // text in the note inspector's own number fields rather than the note.
-    if (!editing && (event.key === 'Delete' || event.key === 'Backspace') && SELECTED_NOTE_ID) {
+    if (!editing && (event.key === 'Delete' || event.key === 'Backspace') && activeSelectionIds().length) {
       event.preventDefault();
-      deleteSelectedNote();
+      deleteSelection();
     }
   }
 
@@ -8083,6 +9119,17 @@
     // for adding/removing notes (see `handlePianoRollDoubleClick`, Phase 4),
     // so the two can never fight over the same click.
     canvas.addEventListener('contextmenu', function (event) {
+      // Phase 5: right-click on a MULTI-selection (more than one note)
+      // opens the bulk-edit panel instead -- checked first, and regardless
+      // of exactly where on the canvas the click landed, since a
+      // box-selected group is not "at" any one note. A single selected note,
+      // or none, falls through to the ordinary per-note inspector unchanged.
+      var selected = activeSelectionIds();
+      if (selected.length > 1) {
+        event.preventDefault();
+        openBulkEditMenu(selected);
+        return;
+      }
       var hit = hoveredRenderEvent(canvas);
       if (hit && hit.record && hit.record.id) {
         event.preventDefault();
@@ -8176,14 +9223,17 @@
   function init() {
     initMenus();
     initTheme();
+    initNotePreview();
     initPitchNameConvention();
     initPaneSplitter();
     initInspector();
     initChannelInspector();
     initLanesScrollSync();
     initNoteInspector();
+    initBulkEditInspector();
     initSoundBrowser();
     initSongLengthModal();
+    initTempoMapModal();
     initMasterVolume();
     initTempoControl();
     el('notificationsBtn').addEventListener('click', toggleNotifications);
@@ -8199,6 +9249,7 @@
     el('menuSaveProject').addEventListener('click', saveProject);
     el('menuExport').addEventListener('click', exportMap);
     el('menuExportLoop').addEventListener('click', exportLoop);
+    el('menuExportMidi').addEventListener('click', exportMidi);
     el('menuExit').addEventListener('click', function () { closeMenus(); if (api()) { api().win_close(); } });
     el('menuAudio').addEventListener('click', refreshAudio);
     el('audioBanner').addEventListener('click', refreshAudio);
@@ -8206,6 +9257,7 @@
     el('emptyNewSongBtn').addEventListener('click', newProject);
     el('addTrackBtn').addEventListener('click', createTrack);
     el('exportBtn').addEventListener('click', exportMap);
+    el('selectModeBtn').addEventListener('click', toggleSelectMode);
     document.addEventListener('keydown', shortcut);
     window.addEventListener('resize', debounce(function () {
       constrainPaneSplit();

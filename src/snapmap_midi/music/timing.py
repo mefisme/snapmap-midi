@@ -146,3 +146,117 @@ def at_speed(stored: dict, speed: float) -> dict:
         for marker in scaled.get(markers, ()):
             marker["time_ms"] = round(float(marker["time_ms"]) / speed, 6)
     return scaled
+
+
+# ---- editing the tempo/time-signature map (Phase 5) ----
+#
+# Everything below works on a STORED map at speed 1.0 -- the same clock
+# `manifest` above produces from a file -- so an edit made through the
+# workstation and an import produce markers in exactly the same shape.
+# `tempo_changes` is the only clock; `time_signatures`' own `time_ms` is
+# always a reading of it, never an independent fact, which is what
+# `resequence` restores after any edit to either list.
+
+
+def tick_at_time(timing: dict, time_ms) -> int:
+    """The tick a given millisecond falls on, at speed 1.0.
+
+    The exact inverse of `time_at_tick` below, and the same binary-search-by-
+    marker shape `app.js::tickAtTime` already uses on the piano roll -- an
+    edit typed as "put a tempo change at 4000 ms" has to land on the same
+    tick the ruler would put the playhead on at that same ms, or the two
+    would disagree about where a bar line falls the moment either one drew
+    it.
+    """
+    ticks_per_beat = int(timing.get("ticks_per_beat") or 480)
+    tempos = timing.get("tempo_changes") or [{"tick": 0, "time_ms": 0.0, "tempo": 500_000}]
+    marker = tempos[0]
+    for candidate in tempos[1:]:
+        if float(candidate["time_ms"]) > time_ms:
+            break
+        marker = candidate
+    tempo = int(marker.get("tempo") or 500_000) or 500_000
+    return int(
+        round(
+            float(marker["tick"])
+            + (float(time_ms) - float(marker["time_ms"])) * 1000 * ticks_per_beat / tempo
+        )
+    )
+
+
+def time_at_tick(timing: dict, tick) -> float:
+    """The millisecond a given tick falls on, at speed 1.0. `tick_at_time`'s inverse."""
+    ticks_per_beat = int(timing.get("ticks_per_beat") or 480)
+    tempos = timing.get("tempo_changes") or [{"tick": 0, "time_ms": 0.0, "tempo": 500_000}]
+    marker = tempos[0]
+    for candidate in tempos[1:]:
+        if int(candidate["tick"]) > tick:
+            break
+        marker = candidate
+    return round(
+        float(marker["time_ms"])
+        + (float(tick) - float(marker["tick"])) * int(marker["tempo"]) / 1000 / ticks_per_beat,
+        6,
+    )
+
+
+def resequence(timing: dict) -> None:
+    """Recompute every marker's `time_ms`, and the fields derived from them,
+    from tick positions and tempo values alone. Mutates `timing` in place.
+
+    Called after every tempo/time-signature edit, the same way `manifest`
+    derives `time_ms` from ticks while reading a file: a marker's tick is the
+    fact an edit changes, and `time_ms` is always a reading of the tempo
+    changes that came before it, walked forward from tick 0 exactly as
+    `manifest` walks the file. `time_signatures` never sets its own tempo, so
+    its `time_ms` is read off the freshly resequenced tempo map instead of
+    carried over from before the edit -- a tempo change earlier in the song
+    moves every later time signature's `time_ms` even though nobody touched
+    the signature itself.
+    """
+    ticks_per_beat = int(timing.get("ticks_per_beat") or 480)
+    tempos = sorted(
+        timing.get("tempo_changes") or [{"tick": 0, "time_ms": 0.0, "tempo": 500_000}],
+        key=lambda marker: int(marker["tick"]),
+    )
+    if not tempos or int(tempos[0]["tick"]) != 0:
+        # Every caller is expected to keep a tick-0 entry; this is a last
+        # resort so a malformed map still resequences to SOMETHING playable
+        # rather than raising on the first marker.
+        tempos = [{"tick": 0, "time_ms": 0.0, "tempo": 500_000}] + tempos
+
+    recomputed = []
+    elapsed_ms = 0.0
+    previous_tick = 0
+    previous_tempo = int(tempos[0]["tempo"])
+    for index, marker in enumerate(tempos):
+        tick = int(marker["tick"])
+        if index:
+            elapsed_ms += (tick - previous_tick) * previous_tempo / 1000 / ticks_per_beat
+        recomputed.append(
+            {"tick": tick, "time_ms": round(elapsed_ms, 6), "tempo": int(marker["tempo"])}
+        )
+        previous_tick = tick
+        previous_tempo = int(marker["tempo"])
+    timing["tempo_changes"] = recomputed
+
+    resequenced = dict(timing)
+    resequenced["tempo_changes"] = recomputed
+    signatures = sorted(
+        timing.get("time_signatures") or [],
+        key=lambda marker: int(marker["tick"]),
+    )
+    timing["time_signatures"] = [
+        {
+            "tick": int(marker["tick"]),
+            "time_ms": time_at_tick(resequenced, int(marker["tick"])),
+            "numerator": int(marker["numerator"]),
+            "denominator": int(marker["denominator"]),
+        }
+        for marker in signatures
+    ]
+    timing["base_bpm"] = round(60_000_000.0 / recomputed[0]["tempo"], 2)
+    if timing.get("duration_ticks") is not None:
+        timing["source_duration_ms"] = time_at_tick(resequenced, int(timing["duration_ticks"]))
+    if timing.get("grid_duration_ticks") is not None:
+        timing["grid_duration_ms"] = time_at_tick(resequenced, int(timing["grid_duration_ticks"]))

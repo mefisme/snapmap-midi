@@ -169,6 +169,47 @@ def test_both_themes_are_defined():
     assert ":root.dark{" in stripped
 
 
+def test_switching_theme_redraws_the_lane_canvases_not_just_the_main_roll():
+    """`setTheme` used to null `RENDER.palette` and invalidate the main roll's
+    own dirty flags, but never told the lanes view (a separate redraw path,
+    `patchLanesView`) a theme switch happened at all -- switching left every
+    lane's grid and note colors frozen at whatever they were last drawn with
+    until an unrelated cache key (zoom, scroll, grid resolution) happened to
+    change too and forced a real redraw."""
+    theme_fn = re.search(r"function setTheme\(name, persist\)\s*\{.*?\n  \}", _JS, re.S).group(0)
+    assert "RENDER.palette = null;" in theme_fn
+    assert "invalidateRollAll();" in theme_fn
+    assert "queueLaneDraw();" in theme_fn
+
+
+def test_lane_canvas_caches_include_the_palette_not_just_layout():
+    """Both per-canvas memoizations (the lane content strip, and the fill
+    strip below the last lane) compared identity, not colors: `rollPalette()`
+    returns the SAME object every call until a theme switch nulls
+    `RENDER.palette`, so comparing the reference is enough to notice a switch
+    happened without hashing every color. Missing this made a lane's grid and
+    note colors survive a theme switch unchanged until some OTHER cache key
+    happened to change for an unrelated reason."""
+    assert "canvas._snapmapClipPalette === palette" in _JS
+    assert "canvas._snapmapClipPalette = palette;" in _JS
+    assert "canvas._snapmapFillPalette === palette" in _JS
+    assert "canvas._snapmapFillPalette = palette;" in _JS
+
+
+def test_the_fill_strip_below_the_lanes_tracks_zoom_not_just_scroll():
+    """`drawLaneGridFill`'s cache key was missing `contentWidth` entirely, so
+    a zoom change -- which moves every grid line without touching scrollLeft,
+    gridKey or height -- left this strip showing lines from whatever zoom
+    level it was last drawn at, visibly misaligned against `drawTrackClip`
+    above it (which DOES key on contentWidth and redrew correctly)."""
+    assert "canvas._snapmapFillContentWidth === contentWidth" in _JS
+    assert "canvas._snapmapFillContentWidth = contentWidth;" in _JS
+    assert (
+        "drawLaneGridFill(\n          fillCanvas, visibleWidth, fillHeight, scrollLeft, "
+        "contentWidth, laneLines, lanePalette\n        );" in _JS
+    )
+
+
 def test_the_shared_snapmap_plus_design_tokens_do_not_drift():
     """Both windows use the exact same canonical light and dark palettes."""
     compact = re.sub(r"\s+", "", _CSS)
@@ -594,7 +635,7 @@ def test_clicking_a_note_opens_the_expression_inspector_and_empty_space_still_se
         assert 'id="%s"' % control in _HTML
 
     assert 'class="inspector note-inspector"' in _HTML
-    assert ".channel-inspector, .note-inspector { width: 390px; }" in _CSS
+    assert ".channel-inspector, .note-inspector, .bulk-edit-inspector { width: 390px; }" in _CSS
     assert 'id: String(event.id || "")' in _JS
     # A hit on a note now hands off to the drag machinery -- which itself
     # SELECTS the note as its first step, rather than opening the inspector
@@ -816,6 +857,124 @@ def test_a_double_click_on_the_roll_draws_or_deletes_a_note():
     assert (
         "api().create_note(trackId, pitch, Math.round(startMs), Math.round(durationMs), 100)" in _JS
     )
+
+
+def test_preview_notes_while_editing_is_a_togglable_persisted_preference():
+    assert 'id="menuNotePreview" role="menuitemcheckbox" aria-checked="true"' in _HTML
+    assert "var NOTE_PREVIEW_KEY = 'snapmap_midi_note_preview';" in _JS
+    assert "var NOTE_PREVIEW_ENABLED = true;" in _JS
+    assert "function storedNotePreview()" in _JS
+    assert "raw === null ? true : raw === '1'" in _JS
+    assert "function setNotePreviewEnabled(enabled, persist)" in _JS
+    assert (
+        "el('menuNotePreview').setAttribute('aria-checked', String(NOTE_PREVIEW_ENABLED));" in _JS
+    )
+    assert "if (!NOTE_PREVIEW_ENABLED) { stopNotePreview(); }" in _JS
+    assert "function initNotePreview()" in _JS
+    assert "initNotePreview();" in _JS
+    assert (
+        "el('menuNotePreview').addEventListener('click', function () {\n"
+        "      setNotePreviewEnabled(!NOTE_PREVIEW_ENABLED, true);\n"
+        "      closeMenus();\n    });"
+    ) in _JS
+
+
+def test_checkable_menu_items_get_a_visible_mark_not_just_the_aria_attribute():
+    """aria-checked alone is not visible -- Light/Dark theme, the octave-label
+    pair, and the new Preview Notes toggle all read identically whether
+    checked or not until this. Padding is reserved on every radio/checkbox
+    item regardless of state so a toggle flipping does not shift its own
+    label sideways; only the checkmark glyph itself is conditional."""
+    assert (
+        '.menu-popup button[role="menuitemradio"], '
+        '.menu-popup button[role="menuitemcheckbox"] {\n'
+        "  position: relative;\n"
+        "  padding-left: 24px;\n}"
+    ) in _CSS
+    assert (
+        '.menu-popup button[role="menuitemradio"][aria-checked="true"]::before,\n'
+        '.menu-popup button[role="menuitemcheckbox"][aria-checked="true"]::before {\n'
+        '  content: "\\2713";\n'
+        "  position: absolute;\n"
+        "  left: 8px;\n"
+        "  font-weight: 700;\n}"
+    ) in _CSS
+
+
+def test_note_preview_sound_is_gated_monophonic_and_never_fetches():
+    """Distinct from `playSamplePreview` (the sound-browser/pitch-calibration
+    audition, which fetches a buffer on demand): this fires on every
+    pointermove that changes pitch during a drag, so it only plays a buffer
+    that is ALREADY decoded rather than awaiting a fetch that would make the
+    sound lag behind the pointer."""
+    assert "function previewNoteSound(soundName, playbackRate, volumeDb)" in _JS
+    fn = re.search(
+        r"function previewNoteSound\(soundName, playbackRate, volumeDb\)\s*\{.*?\n  \}",
+        _JS,
+        re.S,
+    ).group(0)
+    assert "if (!NOTE_PREVIEW_ENABLED || !soundName) { return; }" in fn
+    assert "var buffer = AUDIO.buffers[soundName];" in fn
+    assert "if (!buffer) { return; }" in fn
+    assert "fetchSoundBuffer" not in fn
+    assert "stopNotePreview();" in fn
+    assert "NOTE_PREVIEW_MAX_SECONDS" in fn
+    assert "function stopNotePreview()" in _JS
+
+
+def test_dragging_a_note_previews_it_only_on_an_actual_pitch_change():
+    """The base sound/rate/volume are captured once at drag start -- by the
+    time a pitch changes mid-drag, `source.pitch`/`.playback_rate` already
+    read as the CURRENT dragged-to values (mutateNoteDragEvent overwrites
+    them in place), so scaling from them instead of the captured base would
+    compound with every pointermove instead of tracking the true semitone
+    offset from where the drag began."""
+    begin_fn = re.search(
+        r"function beginNoteDrag\(event, hit, kind\)\s*\{.*?\n  \}", _JS, re.S
+    ).group(0)
+    assert "previewSound: source.sound || null," in begin_fn
+    assert "previewRateBase: Number(source.playback_rate) || 1," in begin_fn
+    assert "previewVolumeBase: Number(source.volume_db) || 0," in begin_fn
+    assert "previewPitchLast: null" in begin_fn
+
+    apply_fn = re.search(
+        r"function applyNoteDragTiming\(startMs, durationMs, pitch\)\s*\{.*?\n  \}", _JS, re.S
+    ).group(0)
+    assert "if (pitch !== NOTE_DRAG.previewPitchLast) {" in apply_fn
+    assert "NOTE_DRAG.previewPitchLast = pitch;" in apply_fn
+    assert "var semitones = pitch - NOTE_DRAG.pitchBase;" in apply_fn
+    assert (
+        "previewNoteSound(\n          NOTE_DRAG.previewSound,\n"
+        "          NOTE_DRAG.previewRateBase * Math.pow(2, semitones / 12),\n"
+        "          NOTE_DRAG.previewVolumeBase\n        );"
+    ) in apply_fn
+
+
+def test_dragging_a_drum_note_previews_the_new_keys_own_sound_not_a_repitch():
+    """A drum kit has no single retunable sample -- each MIDI key is its own
+    literal sound -- so unlike a melodic drag, moving a percussion note to a
+    new key has to switch which sample plays rather than scale the original
+    one's playback rate. Resolved the same order the track-settings drum-key
+    list already uses: song override, then the user's own saved default,
+    then the shipped/analyzed fallback."""
+    assert "function partByTrackId(trackId)" in _JS
+    apply_fn = re.search(
+        r"function applyNoteDragTiming\(startMs, durationMs, pitch\)\s*\{.*?\n  \}", _JS, re.S
+    ).group(0)
+    assert 'if (source.family === "drums") {' in apply_fn
+    assert "var choice = drumKeyChoice(partByTrackId(NOTE_DRAG.trackId), pitch);" in apply_fn
+    assert "previewNoteSound(choice.sound, 1, NOTE_DRAG.previewVolumeBase);" in apply_fn
+
+
+def test_drawing_a_new_note_plays_a_one_shot_preview_of_it():
+    assert "function resolvedEventAt(trackId, pitch, startMs)" in _JS
+    fn = re.search(
+        r"function createNoteAt\(trackId, pitch, startMs, durationMs\)\s*\{.*?\n  \}", _JS, re.S
+    ).group(0)
+    assert "var placed = resolvedEventAt(trackId, pitch, startMs);" in fn
+    assert (
+        "previewNoteSound(placed.sound, Number(placed.playback_rate) || 1, placed.volume_db);"
+    ) in fn
 
 
 def test_a_note_with_no_mapped_sound_stays_dimmed_and_explains_why():
@@ -1083,7 +1242,7 @@ def test_channel_settings_exposes_analysis_calibration_and_track_pitch():
     assert "A saved legacy detune adds" in _JS
     assert 'root_source: "manual",\n      fine_tune_cents: 0' in _JS
     assert "Pitches the sound to match each imported MIDI note." in _JS
-    assert "Sound selected unchanged." in _JS
+    assert "Sound selected. Follow MIDI note is on" in _JS
     assert "relative_anchor" not in _JS
     assert "Stable pitch detected for natural playback" not in _JS
     assert "function closeChannelInspectorAndClearSelection()" in _JS
@@ -1127,12 +1286,13 @@ def test_preview_uses_the_compiler_pitch_and_volume_values_without_rederiving_th
     assert "if (wallOffset >= total) { return; }" in _JS
     assert "Math.pow(10, Number(event.volume_db || 0) / 20)" in _JS
     assert "api().sound_profile(candidate.value, partKey)" not in _JS
-    assert "body.pitch_follow = false;" in _JS
-    assert "body.pitch_follow_preference = false;" in _JS
-    assert "body.root_midi = null;" in _JS
+    assert "body.pitch_follow = true;" in _JS
+    assert "body.pitch_follow_preference = true;" in _JS
+    assert "body.root_midi = NEUTRAL_ROOT_MIDI;" in _JS
     assert "body.detected_root_midi = null;" in _JS
+    assert 'body.root_source = "neutral";' in _JS
     assert "body.fine_tune_cents = 0;" in _JS
-    assert "Sound selected unchanged. Analyze or tune it only when you want pitch following." in _JS
+    assert "Follow MIDI note is on, using an assumed " in _JS
     assert "var activePitch = note.pitch_semitones;" in _JS
     assert "Math.round(Number(activePitch) || 0)" in _JS
     assert "function notePitchOverrideKey(noteId)" in _JS
@@ -1260,10 +1420,16 @@ def test_track_lanes_expose_a_synchronized_horizontal_scrollbar():
     assert "function drawLaneTimingGrid(context, lines, width, height, palette)" in _JS
     assert "drawLaneTimingGrid(context, lines, width, height, palette);" in _JS
     assert 'fill.className = "lane-grid-fill";' in _JS
-    assert "function drawLaneGridFill(canvas, width, height, scrollLeft, lines, palette)" in _JS
+    assert (
+        "function drawLaneGridFill(canvas, width, height, scrollLeft, contentWidth, "
+        "lines, palette)" in _JS
+    )
     assert "var fillHeight = Math.max(0, container.clientHeight - usedHeight);" in _JS
     assert ".lane-grid-fill {" in _CSS
-    assert "background: color-mix(in srgb, var(--track-color) 6%, var(--field));" in _CSS
+    assert (
+        "background: color-mix(in srgb, var(--track-color) var(--laneTint), "
+        "var(--rollField));" in _CSS
+    )
     assert "border-left: 2px solid var(--track-color);" in _CSS
     assert "context.fillStyle = trackColor;" in _JS
     assert "context.strokeStyle = trackColor;" in _JS
@@ -2101,3 +2267,207 @@ def test_lengthening_drags_do_not_clamp_to_their_own_moving_ceiling():
     assert "function positionFromClientXPast(clientX, referenceDurationMs)" in _JS
     assert "positionFromClientXPast(event.clientX, NOTE_DRAG.songLengthBase)" in _JS
     assert "positionFromClientXPast(event.clientX, SONG_LENGTH_DRAG.base)" in _JS
+
+
+# ---- Phase 5: multi-select and bulk edit ----
+
+
+def test_select_mode_toggle_exists_and_is_gated_on_a_song_being_open():
+    assert 'id="selectModeBtn"' in _HTML
+    assert "el('selectModeBtn').addEventListener('click', toggleSelectMode);" in _JS
+    assert "el('selectModeBtn').disabled = !song;" in _JS
+    assert "function toggleSelectMode()" in _JS
+    assert 'el("selectModeBtn").setAttribute("aria-pressed", String(SELECT_MODE));' in _JS
+
+
+def test_box_select_reuses_event_geometry_and_the_render_index():
+    """The plan's own instruction: reuse the existing hit-testing/geometry
+    helpers rather than inventing new coordinate math."""
+    assert "function beginBoxSelect(event, additive)" in _JS
+    assert "function updateBoxSelect(event)" in _JS
+    assert "function endBoxSelect(event)" in _JS
+    assert "var records = eventRenderIndex().records;" in _JS
+    assert "var geometry = eventGeometry(record, 0, 0, duration);" in _JS
+    assert "setMultiSelection(ids, box.additive);" in _JS
+
+
+def test_box_select_only_engages_when_select_mode_is_on():
+    assert "if (SELECT_MODE) {" in _JS
+    assert "beginBoxSelect(event, event.shiftKey);" in _JS
+
+
+def test_multi_selection_is_a_parallel_structure_to_single_selection():
+    """SELECTED_NOTE_ID must keep behaving exactly as Phase 2 left it when no
+    multi-selection exists -- MULTI_SELECTED is additive, not a replacement."""
+    assert "var MULTI_SELECTED = null;" in _JS
+    assert "function activeSelectionMap()" in _JS
+    assert "function setMultiSelection(ids, additive)" in _JS
+    assert "function activeSelectionIds()" in _JS
+
+
+def test_the_single_note_highlight_now_loops_over_the_whole_selection():
+    assert "var selectionMap = activeSelectionMap();" in _JS
+    assert "if (!selectionMap[selected.id]) { continue; }" in _JS
+
+
+def test_right_click_on_a_multi_selection_opens_bulk_edit_instead_of_the_inspector():
+    assert "var selected = activeSelectionIds();" in _JS
+    assert "if (selected.length > 1) {" in _JS
+    assert "openBulkEditMenu(selected);" in _JS
+    # Right-click of a SINGLE selected note (or none) is unchanged Phase 2
+    # behaviour: it still falls through to openNoteInspector.
+    assert "openNoteInspector(hit.record.id);" in _JS
+
+
+def test_bulk_edit_panel_exposes_four_opt_in_fields():
+    for field in ("Velocity", "Pitch", "Start", "Duration"):
+        assert 'id="bulk%sEnabled"' % field in _HTML
+        assert 'id="bulk%sControls"' % field in _HTML
+    assert 'id="bulkVelocityDelta"' in _HTML
+    assert 'id="bulkPitchDelta"' in _HTML
+    assert 'id="bulkStartDelta"' in _HTML
+    assert 'id="bulkDurationRatio"' in _HTML
+    assert 'id="bulkApplyButton"' in _HTML
+    assert 'id="bulkDeleteButton"' in _HTML
+    assert "opt-in" in _HTML
+
+
+def test_bulk_edit_apply_only_sends_the_checked_fields():
+    assert "function applyBulkEdit()" in _JS
+    assert 'var velocityOn = el("bulkVelocityEnabled").checked;' in _JS
+    assert "if (velocityOn) {" in _JS
+    assert "if (pitchOn) {" in _JS
+    assert "if (startOn) {" in _JS
+    assert "if (durationOn) {" in _JS
+    assert "api().bulk_edit_notes(edits).then(" in _JS
+
+
+def test_bulk_delete_reuses_the_bulk_delete_bridge_call():
+    assert "function bulkDeleteNoteIds(ids)" in _JS
+    assert "api().bulk_delete_notes(notes).then(" in _JS
+    assert "function deleteBulkSelection()" in _JS
+    assert "bulkDeleteNoteIds(BULK_EDIT_IDS);" in _JS
+
+
+def test_delete_key_targets_the_whole_selection_not_just_one_note():
+    assert "function deleteSelection()" in _JS
+    assert "if (ids.length > 1) { bulkDeleteNoteIds(ids); return; }" in _JS
+    assert "deleteSelection();" in _JS
+
+
+def test_escape_and_empty_space_clear_the_selection():
+    assert "function clearAllSelection()" in _JS
+    assert "else if (MULTI_SELECTED || SELECTED_NOTE_ID) { clearAllSelection(); }" in _JS
+    assert "clearAllSelection();\n    beginTimelineSeek(event, true);" in _JS
+
+
+def test_bulk_drag_moves_the_whole_selection_together_local_optimistically():
+    assert "function beginBulkNoteDrag(event, leaderId, ids)" in _JS
+    assert "function updateBulkNoteDrag(event)" in _JS
+    assert "function commitBulkNoteDrag(drag)" in _JS
+    assert "api().bulk_edit_notes(edits).then(function (response) {" in _JS
+    assert "function mutateNoteDragEvent(source, startMs, durationMs, pitch)" in _JS
+
+
+# ---- Phase 5: copy/paste ----
+
+
+def test_copy_paste_are_session_local_and_gated_on_not_editing_a_field():
+    assert "var CLIPBOARD = null;" in _JS
+    assert "function copySelection()" in _JS
+    assert "function pasteClipboard()" in _JS
+    assert (
+        "else if (key === 'c') { if (!editing && activeSelectionIds().length) "
+        "{ event.preventDefault(); copySelection(); } }" in _JS
+    )
+    assert (
+        "else if (key === 'v') { if (!editing && CLIPBOARD) "
+        "{ event.preventDefault(); pasteClipboard(); } }" in _JS
+    )
+
+
+def test_copy_preserves_relative_offsets_between_notes():
+    assert "offsetMs: Math.round((Number(note.start) || 0) - earliestStart)" in _JS
+
+
+def test_paste_lands_on_the_open_track_or_falls_back_to_the_copied_tracks_own():
+    assert "function pasteTargetTrackId()" in _JS
+    assert "if (ROLL_PART && !ROLL_GLOBAL) {" in _JS
+    assert "if (SELECTED_PART) {" in _JS
+    assert "if (CLIPBOARD && CLIPBOARD.originTrackId) {" in _JS
+
+
+def test_paste_uses_the_playhead_and_offsets_a_bar_to_avoid_landing_on_the_copy():
+    assert "var playhead = Math.round(currentPosition());" in _JS
+    assert "landing = CLIPBOARD.earliestStart + msFromBars(1);" in _JS
+
+
+def test_paste_creates_notes_through_one_bulk_call_and_selects_them():
+    assert "api().bulk_create_notes(trackId, notes).then(" in _JS
+    assert "setMultiSelection(response.note_ids || [], false);" in _JS
+
+
+def test_duplicate_repeats_the_selection_onto_its_own_tracks_and_never_touches_the_clipboard():
+    assert "function duplicateSelection()" in _JS
+    assert (
+        "else if (key === 'd') { if (!editing && activeSelectionIds().length) "
+        "{ event.preventDefault(); duplicateSelection(); } }" in _JS
+    )
+    duplicate_fn = re.search(r"function duplicateSelection\(\)\s*\{.*?\n  \}", _JS, re.S).group(0)
+    assert "CLIPBOARD" not in duplicate_fn
+    assert "track_id: note.track_id" in duplicate_fn
+    assert "api().duplicate_notes(items).then(" in duplicate_fn
+    assert "setMultiSelection(response.note_ids || [], false);" in duplicate_fn
+
+
+# ---- Phase 5: tempo and time signature editing ----
+
+
+def test_tempo_map_modal_exists_and_is_wired_from_the_file_menu():
+    assert 'id="tempoMapOverlay"' in _HTML
+    assert 'id="menuTempoMap"' in _HTML
+    assert "Tempo &amp; Time Signature..." in _HTML
+    assert "el('menuTempoMap').addEventListener('click', openTempoMapModal);" in _JS
+    assert "function openTempoMapModal()" in _JS
+    assert "function closeTempoMapModal()" in _JS
+
+
+def test_tempo_map_modal_offers_add_edit_and_delete_for_both_maps():
+    assert 'id="tempoPointList"' in _HTML
+    assert 'id="timeSignaturePointList"' in _HTML
+    assert 'id="tempoAddButton"' in _HTML
+    assert 'id="timeSignatureAddButton"' in _HTML
+    assert "function tempoPointRow(marker, isFirst, onCommit, onDelete)" in _JS
+    assert (
+        "api().edit_tempo_change(tick, Math.round(Number(timeMs) || 0), Number(bpm) || 120)" in _JS
+    )
+    assert "api().delete_tempo_change(tick).then(" in _JS
+    assert "api().add_tempo_change(timeMs, bpm).then(" in _JS
+    assert "api().edit_time_signature(" in _JS
+    assert "api().delete_time_signature(tick).then(" in _JS
+    assert "api().add_time_signature(timeMs, numerator, denominator).then(" in _JS
+
+
+def test_tempo_map_reads_the_live_preview_timing_not_a_cached_copy():
+    """The whole point: the same `STATE.preview.timing` payload the ruler's
+    own `timeAtTick`/`tickAtTime` already read, sent with every redraw --
+    not a separate snapshot taken when the modal opened."""
+    assert "function tempoMapTiming() {" in _JS
+    assert "return (STATE.preview && STATE.preview.timing) || {};" in _JS
+
+
+def test_tempo_map_first_point_of_each_list_cannot_be_retimed_or_removed():
+    assert "timeInput.disabled = isFirst;" in _JS
+    assert "remove.disabled = isFirst;" in _JS
+
+
+# ---- Phase 5: MIDI export ----
+
+
+def test_export_midi_menu_item_is_separate_from_export_snapmap():
+    assert 'id="menuExportMidi"' in _HTML
+    assert "Export MIDI..." in _HTML
+    assert "el('menuExportMidi').addEventListener('click', exportMidi);" in _JS
+    assert "function exportMidi()" in _JS
+    assert "api().export_midi().then(" in _JS
+    assert "el('menuExportMidi').disabled = !song;" in _JS

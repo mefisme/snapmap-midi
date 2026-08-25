@@ -66,9 +66,11 @@
           <button type="button" id="menuSaveProject" role="menuitem" disabled><span>Save Project...</span><kbd>Ctrl+S</kbd></button>
           <div class="menu-separator"></div>
           <button type="button" id="menuSongLength" role="menuitem" disabled><span>Set Song Length...</span></button>
+          <button type="button" id="menuTempoMap" role="menuitem" disabled><span>Tempo &amp; Time Signature...</span></button>
           <div class="menu-separator"></div>
           <button type="button" id="menuExport" role="menuitem" disabled><span>Export SnapMap...</span><kbd>Ctrl+E</kbd></button>
           <button type="button" id="menuExportLoop" role="menuitem" disabled><span>Export Loop as Song...</span></button>
+          <button type="button" id="menuExportMidi" role="menuitem" disabled><span>Export MIDI...</span></button>
           <div class="menu-separator"></div>
           <button type="button" id="menuExit" role="menuitem"><span>Exit</span><kbd>Alt+F4</kbd></button>
         </div>
@@ -78,6 +80,8 @@
         <div class="menu-popup" id="menu-playback" role="menu" hidden>
           <button type="button" id="menuPlay" role="menuitem" disabled><span>Play</span><kbd>Space</kbd></button>
           <button type="button" id="menuStart" role="menuitem" disabled><span>Return to Start</span><kbd>Home</kbd></button>
+          <div class="menu-separator"></div>
+          <button type="button" id="menuNotePreview" role="menuitemcheckbox" aria-checked="true"><span>Preview Notes While Editing</span></button>
         </div>
       </div>
       <div class="menu">
@@ -200,6 +204,9 @@
     </label>
     <span class="control-spacer"></span>
     <button type="button" class="roll-view-toggle" id="globalRollToggle" aria-pressed="false" title="Show all tracks in one piano roll">All tracks</button>
+    <button type="button" class="tool-button icon-tool-button" id="selectModeBtn" aria-pressed="false" title="Box-select: drag an empty area to select every note it touches. Right-click a multi-selection to bulk-edit it." aria-label="Box-select mode" disabled>
+      <svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-square"></use></svg>
+    </button>
     <div class="roll-status-legend" aria-label="Piano roll note status legend">
       <span title="Amber striped tail: Sustain Limit begins the note release here."><i class="roll-status-swatch sustain" aria-hidden="true"></i>Sustain cap</span>
       <span title="Red crosshatched tail: a voice was reused here."><i class="roll-status-swatch voice" aria-hidden="true"></i>Voice steal</span>
@@ -562,6 +569,40 @@
     <div class="inspector-foot"><button type="button" class="btn" id="resetNoteExpression">Reset note</button><button type="button" class="btn" id="deleteNoteButton">Delete note</button></div>
   </aside>
 
+  <aside class="inspector bulk-edit-inspector" id="bulkEditInspector" aria-label="Bulk edit notes" hidden>
+    <div class="inspector-head">
+      <div>
+        <strong>Bulk edit</strong>
+        <div class="muted" id="bulkEditSubtitle">0 notes selected</div>
+      </div>
+      <button type="button" class="close-button" id="closeBulkEditInspector" aria-label="Close bulk edit"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-x"></use></svg></button>
+    </div>
+    <div class="inspector-body">
+      <div class="muted control-description">Each field is opt-in: tick a box to change that property on every selected note, and leave the rest unchecked to leave them exactly as written.</div>
+      <div class="control-group">
+        <label class="check-line" for="bulkVelocityEnabled"><input type="checkbox" id="bulkVelocityEnabled"> Velocity</label>
+        <div class="expression-readout control-description">Adds this amount to every selected note's written velocity, clamped to 0-127.</div>
+        <div class="threshold-line dependent" id="bulkVelocityControls"><label for="bulkVelocityDelta">Change by</label><input type="number" id="bulkVelocityDelta" step="1" value="0"><span class="unit">MIDI</span></div>
+      </div>
+      <div class="control-group">
+        <label class="check-line" for="bulkPitchEnabled"><input type="checkbox" id="bulkPitchEnabled"> Pitch</label>
+        <div class="expression-readout control-description">Transposes every selected note's written pitch by this many semitones, clamped to 0-127.</div>
+        <div class="threshold-line dependent" id="bulkPitchControls"><label for="bulkPitchDelta">Transpose by</label><input type="number" id="bulkPitchDelta" step="1" value="0"><span class="unit">semitones</span></div>
+      </div>
+      <div class="control-group">
+        <label class="check-line" for="bulkStartEnabled"><input type="checkbox" id="bulkStartEnabled"> Start</label>
+        <div class="expression-readout control-description">Shifts every selected note's start time by this many milliseconds. A negative value moves them earlier; never before 0 ms.</div>
+        <div class="threshold-line dependent" id="bulkStartControls"><label for="bulkStartDelta">Shift by</label><input type="number" id="bulkStartDelta" step="1" value="0"><span class="unit">ms</span></div>
+      </div>
+      <div class="control-group">
+        <label class="check-line" for="bulkDurationEnabled"><input type="checkbox" id="bulkDurationEnabled"> Duration</label>
+        <div class="expression-readout control-description">Scales every selected note's written duration by this ratio -- 2 doubles it, 0.5 halves it. Never shorter than 1 ms.</div>
+        <div class="threshold-line dependent" id="bulkDurationControls"><label for="bulkDurationRatio">Scale by</label><input type="number" id="bulkDurationRatio" min="0.01" step="0.05" value="1"></div>
+      </div>
+    </div>
+    <div class="inspector-foot"><button type="button" class="btn" id="bulkDeleteButton">Delete selected</button><button type="button" class="btn primary" id="bulkApplyButton">Apply</button></div>
+  </aside>
+
   <div class="statusbar">
     <span id="slotNotes" hidden>Notes <b id="statNotes">0</b></span>
     <span id="slotVoices" hidden>Peak voices <b id="statVoices">0</b></span>
@@ -640,6 +681,46 @@
       <button type="button" class="btn" id="songLengthFit" title="Set the length back to the furthest note, or the file's own last measure">Fit to Content</button>
       <button type="button" class="btn" id="songLengthCancel">Cancel</button>
       <button type="button" class="btn primary" id="songLengthSet">Set length</button>
+    </footer>
+  </section>
+</div>
+
+<div class="modal-overlay" id="tempoMapOverlay" hidden>
+  <section class="modal song-length-modal tempo-map-modal" role="dialog" aria-modal="true" aria-labelledby="tempoMapTitle">
+    <header class="sound-browser-head">
+      <strong id="tempoMapTitle">Tempo &amp; time signature</strong>
+      <button type="button" class="close-button" id="tempoMapClose" aria-label="Close"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-x"></use></svg></button>
+    </header>
+    <div class="song-length-body tempo-map-body">
+      <div class="control-group">
+        <div class="control-title"><span>Tempo changes</span><span class="hint">BPM at a time</span></div>
+        <div class="expression-readout control-description">Each point sets the beats-per-minute from its time onward, until the next point. The first point always starts at 0 ms and cannot be removed.</div>
+        <div class="drum-key-list tempo-point-list" id="tempoPointList"></div>
+        <div class="tempo-add-row">
+          <label>Time<input type="number" id="tempoAddTime" min="0" step="1"><span class="unit">ms</span></label>
+          <label>Tempo<input type="number" id="tempoAddBpm" min="1" max="999" step="0.01" value="120"><span class="unit">BPM</span></label>
+          <button type="button" class="btn" id="tempoAddButton">Add</button>
+        </div>
+      </div>
+      <div class="control-group">
+        <div class="control-title"><span>Time signature changes</span><span class="hint">meter at a time</span></div>
+        <div class="expression-readout control-description">Each point sets the bar grouping from its time onward. The first point always starts at 0 ms and cannot be removed.</div>
+        <div class="drum-key-list tempo-point-list" id="timeSignaturePointList"></div>
+        <div class="tempo-add-row">
+          <label>Time<input type="number" id="timeSignatureAddTime" min="0" step="1"><span class="unit">ms</span></label>
+          <label>Numerator<input type="number" id="timeSignatureAddNumerator" min="1" max="64" step="1" value="4"></label>
+          <label>Denominator
+            <select id="timeSignatureAddDenominator">
+              <option value="1">1</option><option value="2">2</option><option value="4" selected>4</option>
+              <option value="8">8</option><option value="16">16</option><option value="32">32</option>
+            </select>
+          </label>
+          <button type="button" class="btn" id="timeSignatureAddButton">Add</button>
+        </div>
+      </div>
+    </div>
+    <footer class="sound-browser-foot">
+      <button type="button" class="btn primary" id="tempoMapDone">Done</button>
     </footer>
   </section>
 </div>

@@ -22,15 +22,37 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
   --tkKey:#7cb5ff; --tkStr:#ce9178; --tkNum:#9fd394; --tkBool:#c39ce8;
   --sqErr:#f14c4c; --sqWarn:#d7a944; color-scheme: dark;
 }
+/* --rollField is the piano-roll/lanes canvas's own background -- deliberately
+   NOT the shared --field token above, and NOT covered by the "shared design
+   tokens do not drift" contract those come from: that contract is about
+   matching snapmap-plus's shell (inputs, buttons, panels), and the piano
+   roll doesn't exist over there to match. Light mode's --field is pure white,
+   which is fine for a form field but flattens every color-mix() track tint
+   below (.lane-row) into a barely-visible pastel; dark mode's canvas was
+   never white to begin with, so --rollField there is just --field's own dark
+   value, unchanged from before this token existed. --laneTint/--laneTintHover
+   move for the same reason: the same tint percentage reads paler on a
+   lighter base, so light mode's own numbers are higher to land at a similar
+   visible strength, not because dark mode's were wrong. */
+/* First pass (--rollField:#d7dade / rollBlack:#cdd0d6 / rollGrid:#c7cad1 /
+   rollBeat:#b3b7c0) fixed the brightness complaint but not legibility: all
+   four sat within about 15 points of lightness of each other, so nothing
+   actually stood out from anything else -- no clear read on where a row ends
+   or a bar line falls. This pass spreads them across a real range instead:
+   field lightest, black-key rows a visible step down, grid lines a bigger
+   step further, bar lines bold and unmistakable -- the hierarchy a piano
+   roll needs to be readable at a glance, not just "not white." */
 :root {
   --keyWhite:#f4f5f7; --keyWhiteText:#23262b; --keyBlack:#34363b; --keyBlackText:#f4f5f7;
-  --rollBlack:#f4f5f7; --rollGrid:#eceef1; --rollBeat:#d9dce1; --scrollDisabled:#c3c7ce;
-  --rollSustain:#b87913; --rollVoice:#c23a4a;
+  --rollField:#dfe2e7; --rollBlack:#d0d4da; --rollGrid:#b7bbc3; --rollBeat:#8d929c;
+  --scrollDisabled:#c3c7ce; --rollSustain:#b87913; --rollVoice:#c23a4a;
+  --laneTint:12%; --laneTintHover:20%;
 }
 :root.dark {
   --keyWhite:#d9dade; --keyWhiteText:#202126; --keyBlack:#17181b; --keyBlackText:#f0f1f3;
-  --rollBlack:#24262a; --rollGrid:#2a2c31; --rollBeat:#3b3e45; --scrollDisabled:#363940;
-  --rollSustain:#e0ad45; --rollVoice:#f06a71;
+  --rollField:#1f2024; --rollBlack:#24262a; --rollGrid:#2a2c31; --rollBeat:#3b3e45;
+  --scrollDisabled:#363940; --rollSustain:#e0ad45; --rollVoice:#f06a71;
+  --laneTint:6%; --laneTintHover:12%;
 }
 
 [hidden] { display: none !important; }
@@ -60,6 +82,22 @@ html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans
 .menu-popup button { width: 100%; min-height: 25px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 3px 8px; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
 .menu-popup button:hover:not(:disabled), .menu-popup button:focus-visible { background: var(--sel); color: var(--selText); outline: 0; }
 .menu-popup button:disabled { color: var(--muted); opacity: .62; }
+/* aria-checked alone carries no visible state -- a radio/checkbox item read
+   the same whether it was the active theme or not. Left padding is reserved
+   on every one of these regardless of state, so the label does not shift
+   sideways the moment a toggle flips; the checkmark itself only exists in
+   the checked case. */
+.menu-popup button[role="menuitemradio"], .menu-popup button[role="menuitemcheckbox"] {
+  position: relative;
+  padding-left: 24px;
+}
+.menu-popup button[role="menuitemradio"][aria-checked="true"]::before,
+.menu-popup button[role="menuitemcheckbox"][aria-checked="true"]::before {
+  content: "\2713";
+  position: absolute;
+  left: 8px;
+  font-weight: 700;
+}
 .menu-popup kbd { color: inherit; font: 10px "Segoe UI", sans-serif; white-space: nowrap; }
 .menu-separator { height: 1px; margin: 3px 5px; background: var(--border); }
 
@@ -209,17 +247,17 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
    gutter, 31px ruler header) and simply covers it -- the roll keeps its real
    layout size underneath so the ruler's own width/scroll math never sees a
    zero-width viewport, it is just visually and pointer-wise on top. */
-.lanes-view:not([hidden]) { position: absolute; z-index: 4; top: 43px; left: 0; right: 0; bottom: 0; overflow: auto; scrollbar-gutter: stable; scrollbar-color: var(--border2) var(--panel2); background: var(--field); cursor: crosshair; touch-action: none; }
+.lanes-view:not([hidden]) { position: absolute; z-index: 4; top: 43px; left: 0; right: 0; bottom: 0; overflow: auto; scrollbar-gutter: stable; scrollbar-color: var(--border2) var(--panel2); background: var(--rollField); cursor: crosshair; touch-action: none; }
 /* Zero gap, no padding: each lane's height is set from its own track row's
    measured height, and each lane's WIDTH is set to ROLL.contentWidth (see
    patchLanesView) so it scrolls and zooms in lockstep with the ruler instead
    of always redrawing the whole song squeezed into whatever is visible. */
-.lane-row { position: relative; flex: none; box-sizing: border-box; overflow: hidden; background: color-mix(in srgb, var(--track-color) 6%, var(--field)); border-bottom: 1px solid var(--border); border-left: 2px solid var(--track-color); }
-.lane-row:hover { background: color-mix(in srgb, var(--track-color) 12%, var(--field)); }
+.lane-row { position: relative; flex: none; box-sizing: border-box; overflow: hidden; background: color-mix(in srgb, var(--track-color) var(--laneTint), var(--rollField)); border-bottom: 1px solid var(--border); border-left: 2px solid var(--track-color); }
+.lane-row:hover { background: color-mix(in srgb, var(--track-color) var(--laneTintHover), var(--rollField)); }
 .lane-row.muted-lane, .lane-row.solo-excluded-lane { opacity: .5; }
 .lane-canvas { position: absolute; top: 0; left: 0; height: 100%; display: block; }
 .lane-label { position: absolute; left: 8px; top: 5px; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--track-color); pointer-events: none; }
-.lane-grid-fill { position: relative; flex: none; overflow: hidden; background: var(--field); pointer-events: none; }
+.lane-grid-fill { position: relative; flex: none; overflow: hidden; background: var(--rollField); pointer-events: none; }
 .lane-grid-fill-canvas { position: absolute; top: 0; left: 0; display: block; }
 .time-ruler { grid-column: 2; grid-row: 1; display: block; align-self: start; }
 /* Always visible, whether or not "Loop playback" is on -- the toggle only
@@ -229,7 +267,7 @@ body.pane-resizing, body.pane-resizing * { cursor: col-resize !important; }
 .loop-brace.loop-dragging-move { cursor: grabbing; }
 .loop-brace.loop-hover-resize, .loop-brace.loop-dragging-resize { cursor: ew-resize; }
 .pitch-ruler { grid-column: 1; grid-row: 3; display: block; justify-self: start; }
-.roll-viewport { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border2) var(--panel2); background: var(--field); }
+.roll-viewport { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border2) var(--panel2); background: var(--rollField); }
 .roll-extent { position: relative; min-width: 100%; min-height: 100%; }
 #pianoRoll { position: sticky; left: 0; top: 0; display: block; cursor: crosshair; touch-action: none; }
 #pianoRoll.note-hover { cursor: pointer; }
@@ -293,6 +331,19 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .song-length-body input { width: 100%; box-sizing: border-box; }
 .song-length-unit-row { display: flex; gap: 6px; }
 .song-length-unit-row .roll-view-toggle { flex: 1; }
+.tempo-map-modal { width: min(460px, calc(100vw - 48px)); max-height: min(680px, calc(100vh - 56px)); }
+.tempo-map-body { overflow-y: auto; }
+.tempo-map-body .control-group:last-child { border-bottom: 0; }
+.tempo-point-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; margin-bottom: 8px; }
+.tempo-point-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); }
+.tempo-point-row input, .tempo-point-row select { flex: 1; min-width: 0; }
+.tempo-point-row .unit { flex: none; }
+.tempo-point-first input[disabled] { opacity: .6; }
+.tempo-point-row .btn.icon { flex: none; width: 27px; height: 27px; padding: 0; display: grid; place-items: center; }
+.tempo-point-row .btn.icon .ui-icon { width: 14px; height: 14px; }
+.tempo-add-row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.tempo-add-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.tempo-add-row input, .tempo-add-row select { width: 84px; }
 .sound-browser-head { min-height: 58px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel2); }
 .sound-browser-head strong { font-size: 13px; }
 .sound-browser-search { min-height: 46px; flex: none; display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
@@ -371,7 +422,7 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .notification-copy { min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
 .notification-empty { padding: 16px 13px; color: var(--muted); font-style: italic; }
 
-.channel-inspector, .note-inspector { width: 390px; }
+.channel-inspector, .note-inspector, .bulk-edit-inspector { width: 390px; }
 .channel-setting-primary { margin: 0; padding: 2px 0; font-weight: 600; }
 .channel-setting-primary input:disabled { opacity: .72; }
 .channel-pitch-group > .expression-readout { margin-top: 8px; }

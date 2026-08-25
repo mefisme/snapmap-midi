@@ -1162,6 +1162,315 @@ def test_a_note_edit_before_a_song_is_open_says_so():
     assert "song" in result["error"]
 
 
+# ---- bulk editing, deleting and pasting notes (Phase 5) ----
+
+
+def _two_notes(bridge):
+    """Two note ids on the same track, for a bulk edit/delete of more than one."""
+    events = bridge.preview_manifest()["preview"]["display_events"]
+    by_track: dict = {}
+    for event in sorted(events, key=lambda e: e["start"]):
+        by_track.setdefault(event["track_id"], []).append(event)
+    track_id, on_track = next((tid, evs) for tid, evs in by_track.items() if len(evs) >= 2)
+    return track_id, [on_track[0]["id"], on_track[1]["id"]]
+
+
+def test_bulk_editing_notes_changes_every_named_note_in_one_undo_step():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    before = {
+        e["id"]: e
+        for e in bridge.preview_manifest()["preview"]["display_events"]
+        if e["id"] in note_ids
+    }
+    edits = [
+        {
+            "track_id": track_id,
+            "note_id": note_id,
+            "pitch": before[note_id]["pitch"] + 2,
+            "velocity": before[note_id]["velocity"] - 5,
+        }
+        for note_id in note_ids
+    ]
+    result = bridge.bulk_edit_notes(edits)
+    assert result["ok"] is True
+    after = {e["id"]: e for e in result["preview"]["display_events"]}
+    for note_id in note_ids:
+        assert after[note_id]["pitch"] == before[note_id]["pitch"] + 2
+        assert after[note_id]["velocity"] == before[note_id]["velocity"] - 5
+        # Only pitch and velocity were named -- start must be untouched.
+        assert after[note_id]["start"] == before[note_id]["start"]
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Edit 2 notes"
+    restored = {e["id"]: e for e in undone["preview"]["display_events"]}
+    for note_id in note_ids:
+        assert restored[note_id]["pitch"] == before[note_id]["pitch"]
+        assert restored[note_id]["velocity"] == before[note_id]["velocity"]
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Edit 2 notes"
+    reapplied = {e["id"]: e for e in redone["preview"]["display_events"]}
+    for note_id in note_ids:
+        assert reapplied[note_id]["pitch"] == before[note_id]["pitch"] + 2
+
+
+def test_bulk_editing_notes_only_touches_the_fields_named():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    before = {
+        e["id"]: e
+        for e in bridge.preview_manifest()["preview"]["display_events"]
+        if e["id"] in note_ids
+    }
+    new_start = before[note_ids[0]]["start"] + 100
+    result = bridge.bulk_edit_notes(
+        [{"track_id": track_id, "note_id": note_ids[0], "start_ms": new_start}]
+    )
+    assert result["ok"] is True
+    after = next(e for e in result["preview"]["display_events"] if e["id"] == note_ids[0])
+    assert after["start"] == before[note_ids[0]]["start"] + 100
+    assert after["pitch"] == before[note_ids[0]]["pitch"]
+    assert after["velocity"] == before[note_ids[0]]["velocity"]
+
+
+def test_bulk_editing_notes_grows_the_song_length():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    before_duration = bridge.preview_manifest()["preview"]["duration_ms"]
+    before_note = next(
+        e for e in bridge.preview_manifest()["preview"]["display_events"] if e["id"] == note_ids[0]
+    )
+    note_duration = before_note["midi_end"] - before_note["start"]
+    new_start = before_duration + 5000
+    result = bridge.bulk_edit_notes(
+        [{"track_id": track_id, "note_id": note_ids[0], "start_ms": new_start}]
+    )
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == new_start + note_duration
+
+
+def test_bulk_editing_notes_validates_every_edit_before_applying_any():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    before = bridge.preview_manifest()
+    result = bridge.bulk_edit_notes(
+        [
+            {"track_id": track_id, "note_id": note_ids[0], "pitch": 40},
+            {"track_id": track_id, "note_id": note_ids[1], "pitch": 999},
+        ]
+    )
+    assert result["ok"] is False
+    assert "0 to 127" in result["error"]
+    # Nothing from the first, VALID edit in the batch was applied either --
+    # a batch is atomic, not best-effort.
+    assert bridge.preview_manifest() == before
+
+
+def test_bulk_editing_notes_with_an_unknown_note_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    result = bridge.bulk_edit_notes([{"track_id": track_id, "note_id": "n:no-such-note"}])
+    assert result["ok"] is False
+    assert "n:no-such-note" in result["error"]
+
+
+def test_bulk_editing_notes_needs_a_non_empty_list():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.bulk_edit_notes([])
+    assert result["ok"] is False
+    result = bridge.bulk_edit_notes("nonsense")
+    assert result["ok"] is False
+
+
+def test_bulk_edit_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.bulk_edit_notes([{"track_id": "t:1", "note_id": "n:1"}])
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_bulk_deleting_notes_removes_every_one_in_one_undo_step():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    result = bridge.bulk_delete_notes(
+        [{"track_id": track_id, "note_id": note_id} for note_id in note_ids]
+    )
+    assert result["ok"] is True
+    remaining_ids = {e["id"] for e in result["preview"]["display_events"]}
+    assert not remaining_ids & set(note_ids)
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Delete 2 notes"
+    restored_ids = {e["id"] for e in undone["preview"]["display_events"]}
+    assert set(note_ids) <= restored_ids
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Delete 2 notes"
+    reapplied_ids = {e["id"] for e in redone["preview"]["display_events"]}
+    assert not reapplied_ids & set(note_ids)
+
+
+def test_bulk_deleting_notes_with_an_unknown_note_is_refused():
+    bridge = Bridge(midi=TINY_MIDI)
+    track_id, note_ids = _two_notes(bridge)
+    result = bridge.bulk_delete_notes([{"track_id": track_id, "note_id": "n:no-such-note"}])
+    assert result["ok"] is False
+    assert "n:no-such-note" in result["error"]
+
+
+def test_bulk_delete_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.bulk_delete_notes([{"track_id": "t:1", "note_id": "n:1"}])
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_bulk_creating_notes_pastes_several_at_once_in_one_undo_step():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    result = bridge.bulk_create_notes(
+        track_id,
+        [
+            {"pitch": 60, "velocity": 90, "start_ms": 2000, "duration_ms": 200},
+            {"pitch": 64, "velocity": 90, "start_ms": 2200, "duration_ms": 200},
+        ],
+    )
+    assert result["ok"] is True
+    assert len(result["note_ids"]) == 2
+    events = {e["id"]: e for e in result["preview"]["display_events"]}
+    for note_id in result["note_ids"]:
+        assert note_id in events
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Paste 2 notes"
+    assert undone["preview"]["display_events"] == []
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Paste 2 notes"
+    assert len(redone["preview"]["display_events"]) == 2
+
+
+def test_bulk_creating_notes_grows_the_song_length():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    before_duration = bridge.preview_manifest()["preview"]["duration_ms"]
+    result = bridge.bulk_create_notes(
+        track_id, [{"pitch": 60, "start_ms": before_duration + 1000, "duration_ms": 500}]
+    )
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == before_duration + 1000 + 500
+
+
+def test_bulk_creating_notes_on_an_unknown_track_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.bulk_create_notes(
+        "t:no-such-track", [{"pitch": 60, "start_ms": 0, "duration_ms": 200}]
+    )
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_bulk_creating_notes_needs_a_non_empty_list():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    result = bridge.bulk_create_notes(track_id, [])
+    assert result["ok"] is False
+
+
+def test_bulk_create_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.bulk_create_notes("t:1", [{"pitch": 60, "start_ms": 0, "duration_ms": 200}])
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+def test_duplicating_notes_repeats_each_one_onto_its_own_track_in_one_undo_step():
+    bridge = _new_project_bridge()
+    track_a = bridge.create_track("Lead")["track_id"]
+    track_b = bridge.create_track("Bass")["track_id"]
+    result = bridge.duplicate_notes(
+        [
+            {
+                "track_id": track_a,
+                "pitch": 60,
+                "velocity": 90,
+                "start_ms": 3000,
+                "duration_ms": 200,
+            },
+            {
+                "track_id": track_b,
+                "pitch": 36,
+                "velocity": 100,
+                "start_ms": 3000,
+                "duration_ms": 200,
+            },
+        ]
+    )
+    assert result["ok"] is True
+    assert len(result["note_ids"]) == 2
+    events = {e["id"]: e for e in result["preview"]["display_events"]}
+    for note_id in result["note_ids"]:
+        assert note_id in events
+    tracks_hit = {events[note_id]["track_id"] for note_id in result["note_ids"]}
+    assert tracks_hit == {track_a, track_b}
+
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Duplicate 2 notes"
+    assert undone["preview"]["display_events"] == []
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Duplicate 2 notes"
+    assert len(redone["preview"]["display_events"]) == 2
+
+
+def test_duplicating_notes_grows_the_song_length():
+    bridge = _new_project_bridge()
+    track_id = bridge.create_track("Bass")["track_id"]
+    before_duration = bridge.preview_manifest()["preview"]["duration_ms"]
+    result = bridge.duplicate_notes(
+        [
+            {
+                "track_id": track_id,
+                "pitch": 60,
+                "start_ms": before_duration + 1000,
+                "duration_ms": 500,
+            }
+        ]
+    )
+    assert result["ok"] is True
+    assert result["preview"]["duration_ms"] == before_duration + 1000 + 500
+
+
+def test_duplicating_notes_onto_an_unknown_track_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.duplicate_notes(
+        [{"track_id": "t:no-such-track", "pitch": 60, "start_ms": 0, "duration_ms": 200}]
+    )
+    assert result["ok"] is False
+    assert "t:no-such-track" in result["error"]
+
+
+def test_duplicating_notes_needs_a_non_empty_list():
+    bridge = _new_project_bridge()
+    bridge.create_track("Bass")
+    result = bridge.duplicate_notes([])
+    assert result["ok"] is False
+
+
+def test_duplicate_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.duplicate_notes(
+        [{"track_id": "t:1", "pitch": 60, "start_ms": 0, "duration_ms": 200}]
+    )
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
 # ---- drawing notes and managing tracks (Phase 4) ----
 
 
@@ -1698,6 +2007,227 @@ def test_shrinking_song_length_past_the_loop_start_clamps_both_edges():
     assert result["ok"] is True
     assert result["preview"]["loop_end_ms"] == 50
     assert result["preview"]["loop_start_ms"] == 49
+
+
+# ---- tempo and time signature (Phase 5) ----
+
+
+def test_adding_a_tempo_change_appears_in_the_preview_timing():
+    bridge = _new_project_bridge()
+    result = bridge.add_tempo_change(4000, 90)
+    assert result["ok"] is True
+    changes = result["preview"]["timing"]["tempo_changes"]
+    assert [c["tick"] for c in changes][0] == 0
+    added = next(c for c in changes if c["time_ms"] == 4000.0)
+    assert added["tempo"] == round(60_000_000 / 90)
+
+
+def test_adding_a_duplicate_tempo_change_is_refused():
+    bridge = _new_project_bridge()
+    bridge.add_tempo_change(4000, 90)
+    result = bridge.add_tempo_change(4000, 100)
+    assert result["ok"] is False
+    assert "already exists" in result["error"]
+
+
+def test_an_out_of_range_bpm_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.add_tempo_change(1000, 0)
+    assert result["ok"] is False
+    assert "BPM" in result["error"]
+    result = bridge.add_tempo_change(1000, 1000)
+    assert result["ok"] is False
+
+
+def test_adding_a_tempo_change_can_be_undone_and_redone():
+    bridge = _new_project_bridge()
+    bridge.add_tempo_change(4000, 90)
+    undone = bridge.undo()
+    assert undone["ok"] is True
+    assert undone["history"]["undone"] == "Add tempo change"
+    assert len(undone["preview"]["timing"]["tempo_changes"]) == 1
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Add tempo change"
+    assert len(redone["preview"]["timing"]["tempo_changes"]) == 2
+
+
+def test_editing_the_first_tempo_change_cannot_move_it_off_zero():
+    bridge = _new_project_bridge()
+    result = bridge.edit_tempo_change(0, 500, 120)
+    assert result["ok"] is False
+    assert "0 ms" in result["error"]
+
+    ok = bridge.edit_tempo_change(0, 0, 100)
+    assert ok["ok"] is True
+    assert ok["preview"]["timing"]["base_bpm"] == 100.0
+
+
+def test_editing_an_unknown_tempo_change_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.edit_tempo_change(999, 0, 100)
+    assert result["ok"] is False
+    assert "no tempo change" in result["error"]
+
+
+def test_the_first_tempo_change_cannot_be_deleted():
+    bridge = _new_project_bridge()
+    result = bridge.delete_tempo_change(0)
+    assert result["ok"] is False
+    assert "cannot be deleted" in result["error"]
+
+
+def test_deleting_a_tempo_change_removes_it_in_one_undo_step():
+    bridge = _new_project_bridge()
+    added = bridge.add_tempo_change(4000, 90)
+    tick = next(
+        c["tick"] for c in added["preview"]["timing"]["tempo_changes"] if c["time_ms"] == 4000.0
+    )
+    result = bridge.delete_tempo_change(tick)
+    assert result["ok"] is True
+    assert len(result["preview"]["timing"]["tempo_changes"]) == 1
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Delete tempo change"
+    assert len(undone["preview"]["timing"]["tempo_changes"]) == 2
+
+
+def test_a_tempo_change_earlier_in_the_song_moves_a_later_notes_bar_line():
+    """The load-bearing claim of this feature: the ruler's bar-line math reads
+    the LIVE, edited tempo map, not a copy cached at import time. A note
+    written on beat 8 (the second bar in 4/4) is the stand-in for "a later
+    bar line": doubling the tempo in force before it must move where that
+    note's own tick lands in TIME by exactly half, with no re-import and no
+    other bridge call in between.
+    """
+    bridge = _new_project_bridge()
+    before_timing = bridge.preview_manifest()["preview"]["timing"]
+    ticks_per_beat = before_timing["ticks_per_beat"]
+    bar_two_tick = ticks_per_beat * 4 * 1  # the start of the second bar in 4/4
+
+    from snapmap_midi.music import timing as timing_module
+
+    before_bar_two_ms = timing_module.time_at_tick(before_timing, bar_two_tick)
+
+    result = bridge.edit_tempo_change(0, 0, before_timing["base_bpm"] * 2)
+    assert result["ok"] is True
+    after_timing = result["preview"]["timing"]
+    after_bar_two_ms = timing_module.time_at_tick(after_timing, bar_two_tick)
+
+    assert after_timing["base_bpm"] == before_timing["base_bpm"] * 2
+    assert after_bar_two_ms == pytest.approx(before_bar_two_ms / 2)
+
+
+def test_adding_a_time_signature_appears_in_the_preview_timing():
+    bridge = _new_project_bridge()
+    result = bridge.add_time_signature(2000, 3, 4)
+    assert result["ok"] is True
+    signatures = result["preview"]["timing"]["time_signatures"]
+    added = next(s for s in signatures if s["time_ms"] == 2000.0)
+    assert (added["numerator"], added["denominator"]) == (3, 4)
+
+
+def test_a_non_power_of_two_denominator_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.add_time_signature(2000, 3, 5)
+    assert result["ok"] is False
+    assert "power of two" in result["error"]
+
+
+def test_an_out_of_range_numerator_is_refused():
+    bridge = _new_project_bridge()
+    result = bridge.add_time_signature(2000, 0, 4)
+    assert result["ok"] is False
+    assert "numerator" in result["error"]
+
+
+def test_adding_a_duplicate_time_signature_is_refused():
+    bridge = _new_project_bridge()
+    bridge.add_time_signature(2000, 3, 4)
+    result = bridge.add_time_signature(2000, 5, 4)
+    assert result["ok"] is False
+    assert "already exists" in result["error"]
+
+
+def test_editing_the_first_time_signature_cannot_move_it_off_zero():
+    bridge = _new_project_bridge()
+    result = bridge.edit_time_signature(0, 500, 3, 4)
+    assert result["ok"] is False
+    assert "0 ms" in result["error"]
+
+
+def test_the_first_time_signature_cannot_be_deleted():
+    bridge = _new_project_bridge()
+    result = bridge.delete_time_signature(0)
+    assert result["ok"] is False
+    assert "cannot be deleted" in result["error"]
+
+
+def test_deleting_a_time_signature_can_be_undone_and_redone():
+    bridge = _new_project_bridge()
+    added = bridge.add_time_signature(2000, 3, 4)
+    tick = next(
+        s["tick"] for s in added["preview"]["timing"]["time_signatures"] if s["time_ms"] == 2000.0
+    )
+    result = bridge.delete_time_signature(tick)
+    assert result["ok"] is True
+    assert len(result["preview"]["timing"]["time_signatures"]) == 1
+
+    undone = bridge.undo()
+    assert undone["history"]["undone"] == "Delete time signature"
+    assert len(undone["preview"]["timing"]["time_signatures"]) == 2
+
+    redone = bridge.redo()
+    assert redone["history"]["redone"] == "Delete time signature"
+    assert len(redone["preview"]["timing"]["time_signatures"]) == 1
+
+
+def test_a_tempo_edit_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.add_tempo_change(0, 120)
+    assert result["ok"] is False
+    assert "song" in result["error"]
+
+
+# ---- exporting a standard MIDI file (Phase 5) ----
+
+
+def test_export_midi_writes_a_readable_mid_file(tmp_path):
+    bridge = Bridge(midi=TINY_MIDI)
+    destination = tmp_path / "out.mid"
+    result = bridge.export_midi(str(destination))
+    assert result["ok"] is True
+    assert result["destination"] == str(destination)
+    assert destination.exists()
+
+    from snapmap_midi.music import importer
+
+    imported = importer.import_song(str(destination))
+    assert imported.tracks
+    assert sum(len(t.notes) for t in imported.tracks) > 0
+
+
+def test_export_midi_is_not_undo_tracked():
+    bridge = Bridge(midi=TINY_MIDI)
+    assert bridge.undo()["history"]["can_undo"] is False
+    result = bridge.export_midi(str(_SANDBOX / "export_not_undo_tracked.mid"))
+    assert result["ok"] is True
+    # Exporting never pushed a command -- there is still nothing to undo.
+    undo = bridge.undo()
+    assert undo["history"]["undone"] is None
+
+
+def test_export_midi_with_no_window_and_no_path_is_cancelled():
+    bridge = Bridge(midi=TINY_MIDI)
+    result = bridge.export_midi()
+    assert result == {"ok": False, "cancelled": True}
+
+
+def test_export_midi_before_a_song_is_open_says_so():
+    bridge = Bridge()
+    result = bridge.export_midi("/tmp/whatever.mid")
+    assert result["ok"] is False
+    assert "song" in result["error"]
 
 
 # ---- settings ----
